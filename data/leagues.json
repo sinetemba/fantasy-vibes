@@ -1,0 +1,88 @@
+{
+  "PL": {
+    "name": "English Premier League",
+    "country": "England",
+    "openfootball": {
+      "season": "2025-26",
+      "path": "en.1.json",
+      "timezone": "Europe/London"
+    },
+    "football_data": {
+      "code": "PL",
+      "season": "2026"
+    },
+    "thesportsdb": {
+      "league_id": "4328",
+      "season": "2026-2027"
+    },
+    "default": true
+  },
+  "BL1": {
+    "name": "Bundesliga",
+    "country": "Germany",
+    "openfootball": {
+      "season": "2025-26",
+      "path": "de.1.json",
+      "timezone": "Europe/Berlin"
+    },
+    "football_data": {
+      "code": "BL1",
+      "season": "2026"
+    },
+    "thesportsdb": {
+      "league_id": "4331",
+      "season": "2026-2027"
+    }
+  },
+  "SA": {
+    "name": "Serie A",
+    "country": "Italy",
+    "openfootball": {
+      "season": "2025-26",
+      "path": "it.1.json",
+      "timezone": "Europe/Rome"
+    },
+    "football_data": {
+      "code": "SA",
+      "season": "2026"
+    },
+    "thesportsdb": {
+      "league_id": "4332",
+      "season": "2026-2027"
+    }
+  },
+  "PD": {
+    "name": "La Liga",
+    "country": "Spain",
+    "openfootball": {
+      "season": "2025-26",
+      "path": "es.1.json",
+      "timezone": "Europe/Madrid"
+    },
+    "football_data": {
+      "code": "PD",
+      "season": "2026"
+    },
+    "thesportsdb": {
+      "league_id": "4335",
+      "season": "2026-2027"
+    }
+  },
+  "FL1": {
+    "name": "Ligue 1",
+    "country": "France",
+    "openfootball": {
+      "season": "2025-26",
+      "path": "fr.1.json",
+      "timezone": "Europe/Paris"
+    },
+    "football_data": {
+      "code": "FL1",
+      "season": "2026"
+    },
+    "thesportsdb": {
+      "league_id": "4334",
+      "season": "2026-2027"
+    }
+  }
+}
