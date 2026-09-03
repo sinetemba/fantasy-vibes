@@ -175,6 +175,47 @@ DARK_CSS = """
 </style>
 """
 
+_STANDINGS_TABLE_CSS = dedent(
+    """
+    <style>
+        .table-wrapper {
+            overflow-x: auto;
+            border-radius: 12px;
+            border: 1px solid #2c3e50;
+            background-color: #0b0c10;
+        }
+        .group-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-variant-numeric: tabular-nums;
+        }
+        .group-table th {
+            background-color: #37003c;
+            color: #00ff85;
+            padding: 0.65rem 0.5rem;
+            font-size: 0.75rem;
+            font-weight: 700;
+            text-align: center;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            border-bottom: 2px solid #00ff85;
+        }
+        .group-table td {
+            padding: 0.55rem 0.5rem;
+            border-bottom: 1px solid #2c3e50;
+            text-align: center;
+            font-size: 0.85rem;
+            color: #f5f6f7;
+        }
+        .group-table tr:nth-child(even) { background-color: #161b22; }
+        .group-table tr:hover { background-color: rgba(0, 255, 133, 0.08); }
+        .group-table td:first-child { color: #a0a0a0; }
+        .qualified { color: #00ff85; font-weight: 700; }
+        .relegation { color: #e74c3c; font-weight: 700; }
+    </style>
+    """
+).strip()
+
 
 def safe_html(text: str) -> str:
     return html.escape(str(text))
@@ -358,7 +399,7 @@ def create_standings_table(rows: List[Dict]) -> str:
             </tr>
             """
         ).strip()
-    return dedent(
+    table_html = dedent(
         f"""
         <div class="table-wrapper">
             <table class="group-table">
@@ -381,6 +422,7 @@ def create_standings_table(rows: List[Dict]) -> str:
         </div>
         """
     ).strip()
+    return _STANDINGS_TABLE_CSS + "\n" + table_html
 
 
 def match_card_html(

@@ -2,6 +2,7 @@
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 from app.ui import (
     apply_theme,
@@ -28,7 +29,8 @@ def render(service: LeagueService):
         ["position", "team", "played", "won", "drawn", "lost", "goals_for", "goals_against", "goal_difference", "points"]
     ]
 
-    st.markdown(create_standings_table(standings), unsafe_allow_html=True)
+    table_height = max(180, 80 + len(standings) * 50)
+    components.html(create_standings_table(standings), height=table_height, scrolling=False)
 
     st.markdown("---")
     with st.expander("📋 Raw table data"):
