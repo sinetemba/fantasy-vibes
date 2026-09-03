@@ -1,6 +1,7 @@
 """Shared UI components, dark/night mode theming and reusable charts."""
 
 import html
+from textwrap import dedent
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -340,41 +341,46 @@ def create_standings_table(rows: List[Dict]) -> str:
             gd = int(row.get("goal_difference", 0) or 0)
         except (ValueError, TypeError):
             gd = 0
-        body += f"""
-        <tr class="{cls}">
-            <td>{pos}</td>
-            <td class="{cls}" style="text-align:left; padding-left:0.5rem;">{safe_html(row.get('team', ''))}</td>
-            <td>{row.get('played', 0)}</td>
-            <td>{row.get('won', 0)}</td>
-            <td>{row.get('drawn', 0)}</td>
-            <td>{row.get('lost', 0)}</td>
-            <td>{row.get('goals_for', 0)}</td>
-            <td>{row.get('goals_against', 0)}</td>
-            <td>{gd:+d}</td>
-            <td style="font-weight:700;">{row.get('points', 0)}</td>
-        </tr>
+        gd_str = f"{gd:+d}" if gd else "0"
+        body += dedent(
+            f"""
+            <tr class="{cls}">
+                <td>{pos}</td>
+                <td class="{cls}" style="text-align:left; padding-left:0.5rem;">{safe_html(row.get('team', ''))}</td>
+                <td>{row.get('played', 0)}</td>
+                <td>{row.get('won', 0)}</td>
+                <td>{row.get('drawn', 0)}</td>
+                <td>{row.get('lost', 0)}</td>
+                <td>{row.get('goals_for', 0)}</td>
+                <td>{row.get('goals_against', 0)}</td>
+                <td>{gd_str}</td>
+                <td style="font-weight:700;">{row.get('points', 0)}</td>
+            </tr>
+            """
+        ).strip()
+    return dedent(
+        f"""
+        <div class="table-wrapper">
+            <table class="group-table">
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th style="text-align:left;">Team</th>
+                        <th>P</th>
+                        <th>W</th>
+                        <th>D</th>
+                        <th>L</th>
+                        <th>GF</th>
+                        <th>GA</th>
+                        <th>GD</th>
+                        <th>Pts</th>
+                    </tr>
+                </thead>
+                <tbody>{body}</tbody>
+            </table>
+        </div>
         """
-    return f"""
-    <div class="table-wrapper">
-        <table class="group-table">
-            <thead>
-                <tr>
-                    <th>#</th>
-                    <th style="text-align:left;">Team</th>
-                    <th>P</th>
-                    <th>W</th>
-                    <th>D</th>
-                    <th>L</th>
-                    <th>GF</th>
-                    <th>GA</th>
-                    <th>GD</th>
-                    <th>Pts</th>
-                </tr>
-            </thead>
-            <tbody>{body}</tbody>
-        </table>
-    </div>
-    """
+    ).strip()
 
 
 def match_card_html(
@@ -402,21 +408,23 @@ def match_card_html(
     }.get(status, "#3498db")
     status_label = minutes or status.replace("_", " ").upper()
 
-    return f"""
-    <div class="card" style="padding:1rem; margin:0.5rem 0;">
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.75rem;">
-            <span style="font-size:0.8rem; color:#a0a0a0;">{safe_html(round_label)}</span>
-            <span style="background:{status_color}; color:#0b0c10; padding:0.25rem 0.6rem; border-radius:12px; font-size:0.75rem; font-weight:700;">
-                {safe_html(status_label)}
-            </span>
-        </div>
-        <div style="display:flex; justify-content:space-between; align-items:center; gap:1rem;">
-            <div style="flex:1; text-align:right; font-weight:700; font-size:1.1rem;">{safe_html(home_team)}</div>
-            <div style="min-width:80px; text-align:center;">
-                <div style="font-size:1.8rem; font-weight:800; color:#00ff85;">{score}</div>
-                <div style="font-size:0.75rem; color:#a0a0a0;">{safe_html(time)} SAST</div>
+    return dedent(
+        f"""
+        <div class="card" style="padding:1rem; margin:0.5rem 0;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.75rem;">
+                <span style="font-size:0.8rem; color:#a0a0a0;">{safe_html(round_label)}</span>
+                <span style="background:{status_color}; color:#0b0c10; padding:0.25rem 0.6rem; border-radius:12px; font-size:0.75rem; font-weight:700;">
+                    {safe_html(status_label)}
+                </span>
             </div>
-            <div style="flex:1; text-align:left; font-weight:700; font-size:1.1rem;">{safe_html(away_team)}</div>
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:1rem;">
+                <div style="flex:1; text-align:right; font-weight:700; font-size:1.1rem;">{safe_html(home_team)}</div>
+                <div style="min-width:80px; text-align:center;">
+                    <div style="font-size:1.8rem; font-weight:800; color:#00ff85;">{score}</div>
+                    <div style="font-size:0.75rem; color:#a0a0a0;">{safe_html(time)} SAST</div>
+                </div>
+                <div style="flex:1; text-align:left; font-weight:700; font-size:1.1rem;">{safe_html(away_team)}</div>
+            </div>
         </div>
-    </div>
-    """
+        """
+    ).strip()
