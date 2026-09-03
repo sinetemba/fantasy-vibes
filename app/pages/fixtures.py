@@ -81,12 +81,11 @@ def _render_filters(matches: List[Dict[str, Any]], service: LeagueService):
     with c2:
         if dates:
             today = date.today()
-            default_date = max(min(today, dates[-1]), dates[0])
             st.date_input(
                 "📅 Date",
-                value=default_date,
-                min_value=dates[0],
-                max_value=dates[-1],
+                value=today,
+                min_value=min(today, dates[0]),
+                max_value=max(today, dates[-1]),
                 key="fixtures_date",
             )
     with c3:
