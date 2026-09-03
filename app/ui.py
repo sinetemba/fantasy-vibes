@@ -137,25 +137,38 @@ DARK_CSS = """
     }
 
     /* Group table (used for standings) */
+    .table-wrapper {
+        overflow-x: auto;
+        border-radius: 12px;
+        border: 1px solid #2c3e50;
+        background-color: #0b0c10;
+    }
     .group-table {
         width: 100%;
         border-collapse: collapse;
+        font-variant-numeric: tabular-nums;
     }
     .group-table th {
         background-color: #37003c;
         color: #00ff85;
-        padding: 0.5rem;
-        font-size: 0.85rem;
+        padding: 0.65rem 0.5rem;
+        font-size: 0.75rem;
+        font-weight: 700;
         text-align: center;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        border-bottom: 2px solid #00ff85;
     }
     .group-table td {
-        padding: 0.4rem 0.5rem;
+        padding: 0.55rem 0.5rem;
         border-bottom: 1px solid #2c3e50;
         text-align: center;
         font-size: 0.85rem;
         color: #f5f6f7;
     }
     .group-table tr:nth-child(even) { background-color: #161b22; }
+    .group-table tr:hover { background-color: rgba(0, 255, 133, 0.08); }
+    .group-table td:first-child { color: #a0a0a0; }
     .qualified { color: #00ff85; font-weight: 700; }
     .relegation { color: #e74c3c; font-weight: 700; }
 </style>
@@ -315,13 +328,21 @@ def create_standings_table(rows: List[Dict]) -> str:
     body = ""
     for row in rows:
         cls = ""
-        if row.get("position", 99) <= 4:
+        try:
+            pos = int(row.get("position", 99))
+        except (ValueError, TypeError):
+            pos = 99
+        if pos <= 4:
             cls = "qualified"
-        elif row.get("position", 0) >= 18:
+        elif pos >= 18:
             cls = "relegation"
+        try:
+            gd = int(row.get("goal_difference", 0) or 0)
+        except (ValueError, TypeError):
+            gd = 0
         body += f"""
-        <tr>
-            <td>{row.get('position', '-')}</td>
+        <tr class="{cls}">
+            <td>{pos}</td>
             <td class="{cls}" style="text-align:left; padding-left:0.5rem;">{safe_html(row.get('team', ''))}</td>
             <td>{row.get('played', 0)}</td>
             <td>{row.get('won', 0)}</td>
@@ -329,28 +350,30 @@ def create_standings_table(rows: List[Dict]) -> str:
             <td>{row.get('lost', 0)}</td>
             <td>{row.get('goals_for', 0)}</td>
             <td>{row.get('goals_against', 0)}</td>
-            <td>{row.get('goal_difference', 0):+d}</td>
+            <td>{gd:+d}</td>
             <td style="font-weight:700;">{row.get('points', 0)}</td>
         </tr>
         """
     return f"""
-    <table class="group-table">
-        <thead>
-            <tr>
-                <th>#</th>
-                <th style="text-align:left;">Team</th>
-                <th>P</th>
-                <th>W</th>
-                <th>D</th>
-                <th>L</th>
-                <th>GF</th>
-                <th>GA</th>
-                <th>GD</th>
-                <th>Pts</th>
-            </tr>
-        </thead>
-        <tbody>{body}</tbody>
-    </table>
+    <div class="table-wrapper">
+        <table class="group-table">
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th style="text-align:left;">Team</th>
+                    <th>P</th>
+                    <th>W</th>
+                    <th>D</th>
+                    <th>L</th>
+                    <th>GF</th>
+                    <th>GA</th>
+                    <th>GD</th>
+                    <th>Pts</th>
+                </tr>
+            </thead>
+            <tbody>{body}</tbody>
+        </table>
+    </div>
     """
 
 

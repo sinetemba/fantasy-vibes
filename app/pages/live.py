@@ -4,6 +4,8 @@ from datetime import datetime
 
 import streamlit as st
 
+import streamlit.components.v1 as components
+
 from app.ui import (
     apply_theme,
     display_disclaimer,
@@ -27,13 +29,23 @@ def render(service: LeagueService):
 
     st.markdown("## ⚽ Live & Upcoming")
 
-    col1, col2 = st.columns([3, 1])
-    with col1:
+    c1, c2, c3 = st.columns([3, 1, 1])
+    with c1:
         st.markdown("Real-time and recent match data pulled from the active data source.")
-    with col2:
+    with c2:
         if st.button("🔄 Refresh Now", use_container_width=True):
             _refresh(service)
             st.rerun()
+    with c3:
+        auto_refresh = st.checkbox("Auto-refresh", value=False, key="live_auto_refresh")
+
+    if auto_refresh:
+        interval = st.slider("Refresh interval (s)", 30, 300, 60, key="live_refresh_interval")
+        components.html(
+            f"<script>setTimeout(function(){{window.location.reload();}}, {interval*1000});</script>",
+            height=0,
+            width=0,
+        )
 
     matches = service.get_matches()
     if not matches:

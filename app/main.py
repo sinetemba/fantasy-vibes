@@ -50,17 +50,23 @@ def init_session_state():
         st.session_state.current_page = "Home"
     if "last_league" not in st.session_state:
         st.session_state.last_league = st.session_state.league_service.get_current_code()
+    if "favourite_team" not in st.session_state:
+        st.session_state.favourite_team = st.query_params.get("fav")
 
 
 def _default_league_code() -> str:
+    candidate = st.query_params.get("league")
     try:
         service = LeagueService()
+        codes = [c for c, _ in service.get_leagues()]
+        if candidate and candidate in codes:
+            return candidate
         for code, _ in service.get_leagues():
             if service._leagues.get(code, {}).get("default"):
                 return code
-        return service.get_leagues()[0][0]
+        return codes[0]
     except Exception:
-        return "PL"
+        return candidate or "PL"
 
 
 def _change_league():
@@ -68,7 +74,15 @@ def _change_league():
     if new_code and new_code != st.session_state.league_service.get_current_code():
         st.session_state.league_service.set_league(new_code)
         st.session_state.last_league = new_code
+        st.query_params["league"] = new_code
         st.rerun()
+
+
+def _change_favourite():
+    new_fav = st.session_state.get("fav_select")
+    if new_fav:
+        st.session_state.favourite_team = new_fav
+        st.query_params["fav"] = new_fav
 
 
 def render_sidebar():
@@ -103,6 +117,22 @@ def render_sidebar():
             key="league_select",
             on_change=_change_league,
         )
+
+        # Favourite team
+        teams = service.get_teams()
+        if teams:
+            fav = st.session_state.get("favourite_team")
+            if not fav or fav not in teams:
+                fav = teams[0]
+                st.session_state.favourite_team = fav
+            fav_index = teams.index(fav)
+            st.selectbox(
+                "⭐ Favourite Team",
+                options=teams,
+                index=fav_index,
+                key="fav_select",
+                on_change=_change_favourite,
+            )
 
         st.markdown("---")
 

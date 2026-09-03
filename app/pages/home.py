@@ -15,6 +15,65 @@ from app.ui import (
 from src.data import LeagueService
 
 
+def _render_favourite_team(service: LeagueService, team: str):
+    st.markdown("### ⭐ Your Favourite Team")
+    stats = service.get_team_stats(team)
+    if stats:
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.metric("Position", stats.get("position", "—"))
+        with c2:
+            st.metric("Points", stats.get("points", "—"))
+        with c3:
+            st.metric("Form", stats.get("form", "—"))
+    else:
+        st.caption("Team data not available.")
+
+    with st.expander("Recent form"):
+        form = service.get_team_form(team, n=5)
+        if form:
+            for m in form:
+                date = m.get("date", "")[:10]
+                st.caption(f"{date} {m.get('venue', '')} vs {m.get('opponent', '')} {m.get('score', '')} ({m.get('result', '')})")
+        else:
+            st.caption("No recent form data.")
+
+    upcoming = [
+        m
+        for m in service.get_matches()
+        if m.get("status") == "scheduled" and (m["home_team"] == team or m["away_team"] == team)
+    ]
+    if upcoming:
+        upcoming.sort(key=lambda m: m.get("date") or "z")
+        next_match = upcoming[0]
+        st.markdown("**Next match**")
+        try:
+            dt = datetime.fromisoformat(next_match.get("date")) if next_match.get("date") else None
+            kickoff = dt.strftime("%a, %d %b %Y %H:%M") if dt else ""
+        except Exception:
+            kickoff = ""
+        st.markdown(
+            match_card_html(
+                next_match["home_team"],
+                next_match["away_team"],
+                next_match.get("home_score"),
+                next_match.get("away_score"),
+                next_match.get("status", "scheduled"),
+                next_match.get("minutes_elapsed", "TBD"),
+                round_label=next_match.get("round", ""),
+                time=kickoff,
+            ),
+            unsafe_allow_html=True,
+        )
+        if st.button("🔮 Predict this match", use_container_width=True, key="fav_predict"):
+            st.session_state["pred_home"] = next_match["home_team"]
+            st.session_state["pred_away"] = next_match["away_team"]
+            st.session_state.current_page = "Predictions"
+            st.rerun()
+    else:
+        st.info("No upcoming fixtures for this team.")
+
+
 def render(service: LeagueService):
     apply_theme()
     display_header(service.get_current_name(), "Live data, standings & match predictions")
@@ -51,6 +110,12 @@ def render(service: LeagueService):
         display_metric_card("Matches Loaded", f"{len(matches)}", "")
 
     st.markdown("---")
+
+    # Favourite team watchlist
+    favourite = st.session_state.get("favourite_team")
+    if favourite and favourite in service.get_teams():
+        _render_favourite_team(service, favourite)
+        st.markdown("---")
 
     # Top teams mini-table
     if standings:
@@ -96,6 +161,11 @@ def render(service: LeagueService):
     if upcoming:
         st.markdown("### 📅 Next Fixture")
         next_match = upcoming[0]
+        try:
+            dt = datetime.fromisoformat(next_match.get("date")) if next_match.get("date") else None
+            fixture_time = dt.strftime("%a, %d %b %Y %H:%M") if dt else ""
+        except Exception:
+            fixture_time = ""
         st.markdown(
             match_card_html(
                 next_match["home_team"],
@@ -105,7 +175,7 @@ def render(service: LeagueService):
                 next_match.get("status", "scheduled"),
                 next_match.get("minutes_elapsed", "TBD"),
                 round_label=next_match.get("round", ""),
-                time=next_match.get("date", "")[11:16] if next_match.get("date") else "",
+                time=fixture_time,
             ),
             unsafe_allow_html=True,
         )

@@ -40,12 +40,20 @@ def render(service: LeagueService):
         st.info("At least two teams are needed for predictions.")
         return
 
+    # Pre-select teams if they were set elsewhere (e.g. favourite team on Home)
+    if st.session_state.get("pred_home") not in teams:
+        st.session_state["pred_home"] = teams[0]
+    if st.session_state.get("pred_away") == st.session_state.get("pred_home"):
+        st.session_state["pred_away"] = None
+
     c1, c2 = st.columns(2)
     with c1:
-        home = st.selectbox("🏠 Home Team", teams, index=0, key="pred_home")
+        home = st.selectbox("🏠 Home Team", teams, key="pred_home")
     with c2:
         away_options = [t for t in teams if t != home]
-        away = st.selectbox("✈️ Away Team", away_options, index=0, key="pred_away")
+        if st.session_state.get("pred_away") not in away_options:
+            st.session_state["pred_away"] = away_options[0] if away_options else None
+        away = st.selectbox("✈️ Away Team", away_options, key="pred_away")
 
     neutral = st.checkbox("Neutral venue (no home advantage)", value=False, key="pred_neutral")
 
