@@ -137,6 +137,22 @@ DARK_CSS = """
         border: 1px solid #00ff85 !important;
     }
 
+    /* Selectbox dropdown in sidebar */
+    [data-testid="stSidebar"] [data-baseweb="select"] [role="listbox"] {
+        background-color: #1f2833 !important;
+        border: 1px solid #37003c !important;
+    }
+    [data-testid="stSidebar"] [data-baseweb="select"] [role="option"] {
+        color: #f5f6f7 !important;
+        background-color: #1f2833 !important;
+    }
+    [data-testid="stSidebar"] [data-baseweb="select"] [role="option"]:hover {
+        background-color: rgba(0, 255, 133, 0.2) !important;
+    }
+    [data-testid="stSidebar"] [data-baseweb="select"] input {
+        color: #f5f6f7 !important;
+    }
+
     /* Group table (used for standings) */
     .table-wrapper {
         overflow-x: auto;
