@@ -38,6 +38,7 @@ PAGES = {
     "🏠 Home": "Home",
     "⚽ Live": "Live",
     "📅 Fixtures": "Fixtures",
+    "🗓️ Today's Fixtures": "TodaysFixtures",
     "📊 Table": "Table",
     "🔮 Predictions": "Predictions",
     "📈 Stats": "Stats",
@@ -221,6 +222,9 @@ def render_page():
         elif page == "Fixtures":
             from app.pages import fixtures
             fixtures.render(service)
+        elif page == "TodaysFixtures":
+            from app.pages import todays_fixtures
+            todays_fixtures.render(service)
         elif page == "Table":
             from app.pages import table
             table.render(service)
