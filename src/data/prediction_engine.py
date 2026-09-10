@@ -25,6 +25,16 @@ def _draw_prob(elo_diff: float) -> float:
     return max(0.15, 0.35 - abs(elo_diff) / 2000.0)
 
 
+RECENCY_HALF_LIFE_DAYS = 180.0
+
+
+def _weighted_avg(values: np.ndarray, weights: np.ndarray) -> float:
+    total = weights.sum()
+    if total <= 0:
+        return float(np.mean(values))
+    return float(np.average(values, weights=weights))
+
+
 class PredictionEngine:
     """Fits attack/defense, Elo and form from match history then predicts."""
 
@@ -56,20 +66,29 @@ class PredictionEngine:
             return
 
         df = pd.DataFrame(records)
-        df["date"] = pd.to_datetime(df["date"], errors="coerce")
-        df = df.dropna(subset=["home_score", "away_score"])
+        df["date"] = pd.to_datetime(df["date"], utc=True, errors="coerce")
+        df = df.dropna(subset=["home_score", "away_score", "date"])
 
         self.teams = set(df["home_team"].unique()) | set(df["away_team"].unique())
 
-        self.league_avg_home = max(df["home_score"].mean(), 0.1)
-        self.league_avg_away = max(df["away_score"].mean(), 0.1)
+        # Recency weighting: more recent matches count more.
+        latest = df["date"].max()
+        df["days_ago"] = (latest - df["date"]).dt.days.astype(float)
+        df["weight"] = np.exp(-np.log(2) / RECENCY_HALF_LIFE_DAYS * df["days_ago"])
+        df["weight"] = df["weight"].clip(lower=0.01)
+
+        self.league_avg_home = max(_weighted_avg(df["home_score"].values, df["weight"].values), 0.1)
+        self.league_avg_away = max(_weighted_avg(df["away_score"].values, df["weight"].values), 0.1)
         self.home_advantage = max(1.05, min(1.4, self.league_avg_home / self.league_avg_away))
 
-        # Attack/defense ratings
-        home_goals = df.groupby("home_team")["home_score"].mean().to_dict()
-        home_conceded = df.groupby("home_team")["away_score"].mean().to_dict()
-        away_goals = df.groupby("away_team")["away_score"].mean().to_dict()
-        away_conceded = df.groupby("away_team")["home_score"].mean().to_dict()
+        # Attack/defense ratings with recency weighting
+        def _group_weighted(group_df, value_col):
+            return _weighted_avg(group_df[value_col].values, group_df["weight"].values)
+
+        home_goals = df.groupby("home_team").apply(_group_weighted, "home_score", include_groups=False).to_dict()
+        home_conceded = df.groupby("home_team").apply(_group_weighted, "away_score", include_groups=False).to_dict()
+        away_goals = df.groupby("away_team").apply(_group_weighted, "away_score", include_groups=False).to_dict()
+        away_conceded = df.groupby("away_team").apply(_group_weighted, "home_score", include_groups=False).to_dict()
 
         self.home_attack = {t: g / self.league_avg_home for t, g in home_goals.items()}
         self.home_defense = {t: g / self.league_avg_away for t, g in home_conceded.items()}
@@ -79,8 +98,8 @@ class PredictionEngine:
         # Elo ratings
         self._fit_elo(df)
 
-        # Recent form (last 5 matches)
-        self._fit_form(df)
+        # Recent form (weighted last 10 matches)
+        self._fit_form(df, n=10)
 
         self.fitted = True
         self.last_trained = datetime.now().isoformat()
@@ -92,6 +111,7 @@ class PredictionEngine:
             home = row["home_team"]
             away = row["away_team"]
             hs, aws = row["home_score"], row["away_score"]
+            weight = row.get("weight", 1.0)
 
             expected = _expected_score(self.elo[home] + home_field, self.elo[away])
             if hs > aws:
@@ -101,7 +121,7 @@ class PredictionEngine:
             else:
                 actual = 0.0
 
-            delta = k * (actual - expected)
+            delta = k * weight * (actual - expected)
             self.elo[home] += delta
             self.elo[away] -= delta
 
@@ -109,8 +129,8 @@ class PredictionEngine:
         for t in self.teams:
             self.elo.setdefault(t, 1500.0)
 
-    def _fit_form(self, df: pd.DataFrame, n: int = 5):
-        form = {t: [] for t in self.teams}
+    def _fit_form(self, df: pd.DataFrame, n: int = 10):
+        form: Dict[str, List[Dict[str, Any]]] = {t: [] for t in self.teams}
         for _, row in df.sort_values("date").iterrows():
             home, away = row["home_team"], row["away_team"]
             hs, aws = row["home_score"], row["away_score"]
@@ -120,14 +140,19 @@ class PredictionEngine:
                 home_pts, away_pts = 1, 1
             else:
                 home_pts, away_pts = 0, 3
-            form[home].append(home_pts)
-            form[away].append(away_pts)
+            form[home].append({"pts": home_pts, "weight": row.get("weight", 1.0)})
+            form[away].append({"pts": away_pts, "weight": row.get("weight", 1.0)})
 
         self.form_ppg = {}
-        for t, pts in form.items():
-            recent = pts[-n:]
-            max_pts = len(recent) * 3
-            self.form_ppg[t] = (sum(recent) / max_pts) if max_pts else 0.5
+        for t, entries in form.items():
+            recent = entries[-n:]
+            if not recent:
+                self.form_ppg[t] = 0.5
+                continue
+            pts = np.array([e["pts"] for e in recent], dtype=float)
+            weights = np.array([e["weight"] for e in recent], dtype=float)
+            avg_pts = _weighted_avg(pts, weights)
+            self.form_ppg[t] = avg_pts / 3.0
 
     def _form_factor(self, team: str) -> float:
         ppg = self.form_ppg.get(team, 0.5)
@@ -268,3 +293,38 @@ class PredictionEngine:
             "score_matrix": np.zeros((7, 7)),
             "last_trained": self.last_trained,
         }
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize fitted parameters to a JSON-safe dict."""
+        return {
+            "fitted": self.fitted,
+            "last_trained": self.last_trained,
+            "league_avg_home": self.league_avg_home,
+            "league_avg_away": self.league_avg_away,
+            "home_advantage": self.home_advantage,
+            "home_attack": self.home_attack,
+            "home_defense": self.home_defense,
+            "away_attack": self.away_attack,
+            "away_defense": self.away_defense,
+            "elo": self.elo,
+            "form_ppg": self.form_ppg,
+            "teams": sorted(self.teams),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "PredictionEngine":
+        """Restore a fitted engine from a serialized dict."""
+        engine = cls()
+        engine.fitted = data.get("fitted", False)
+        engine.last_trained = data.get("last_trained")
+        engine.league_avg_home = data.get("league_avg_home", 1.4)
+        engine.league_avg_away = data.get("league_avg_away", 1.1)
+        engine.home_advantage = data.get("home_advantage", 1.15)
+        engine.home_attack = data.get("home_attack", {})
+        engine.home_defense = data.get("home_defense", {})
+        engine.away_attack = data.get("away_attack", {})
+        engine.away_defense = data.get("away_defense", {})
+        engine.elo = data.get("elo", {})
+        engine.form_ppg = data.get("form_ppg", {})
+        engine.teams = set(data.get("teams", []))
+        return engine

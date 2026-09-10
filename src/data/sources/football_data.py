@@ -2,10 +2,9 @@
 
 import logging
 import os
+import urllib.parse
 from datetime import datetime
 from typing import Any, Dict, List, Optional
-
-import requests
 
 from ..utils import cached_get, sast_now, to_sast
 from .base import DataSource
@@ -49,35 +48,40 @@ class FootballDataSource(DataSource):
     def is_available(self, league_config: Dict[str, Any]) -> bool:
         return bool(_load_api_key()) and "football_data" in league_config
 
-    def _api_get(self, path: str, params: Optional[Dict] = None) -> Optional[Dict[str, Any]]:
+    def _api_get(
+        self,
+        path: str,
+        params: Optional[Dict] = None,
+        ttl_seconds: int = 300,
+    ) -> Optional[Dict[str, Any]]:
         if not _load_api_key():
             return None
         url = f"{API_BASE}{path}"
-        headers = _headers()
-        try:
-            response = requests.get(
-                url, headers=headers, params=params, timeout=REQUEST_TIMEOUT
-            )
-            if response.status_code == 429:
-                logger.warning("Football-Data.org rate limit exceeded")
-                return None
-            if response.status_code == 401:
-                logger.warning("Football-Data.org API key rejected")
-                return None
-            response.raise_for_status()
-            return response.json()
-        except Exception as exc:
-            logger.warning(f"Football-Data.org request failed: {exc}")
-        return None
+        if params:
+            url = f"{url}?{urllib.parse.urlencode(params)}"
+        data = cached_get(url, headers=_headers(), ttl_seconds=ttl_seconds, timeout=REQUEST_TIMEOUT)
+        if data is None:
+            logger.warning("Football-Data.org returned no data (rate-limited, key rejected, or unavailable)")
+        return data
 
     def get_matches(
-        self, league_config: Dict[str, Any], season: Optional[str] = None
+        self,
+        league_config: Dict[str, Any],
+        season: Optional[str] = None,
+        status_filter: Optional[str] = None,
+        ttl_seconds: int = 300,
     ) -> List[Dict[str, Any]]:
         cfg = league_config.get("football_data", {})
         code = cfg.get("code", "PL")
         season_param = season or cfg.get("season", "")
-        params = {"season": season_param} if season_param else None
-        data = self._api_get(f"/competitions/{code}/matches", params)
+        params: Dict[str, str] = {}
+        if season_param:
+            params["season"] = season_param
+        if status_filter:
+            params["status"] = status_filter
+        if not params:
+            params = None  # type: ignore[assignment]
+        data = self._api_get(f"/competitions/{code}/matches", params, ttl_seconds=ttl_seconds)
         if not data:
             return []
 
@@ -134,6 +138,10 @@ class FootballDataSource(DataSource):
 
         matches.sort(key=lambda x: x["date"] or "")
         return matches
+
+    def get_live_matches(self, league_config: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Fetch only currently live matches with a short cache so scores update."""
+        return self.get_matches(league_config, status="LIVE", ttl_seconds=15)
 
     def get_standings(
         self, league_config: Dict[str, Any], season: Optional[str] = None

@@ -4,6 +4,8 @@ from datetime import date, datetime
 from itertools import groupby
 from typing import Any, Dict, List
 
+MAX_BATCH_PREDICTIONS = 20
+
 import streamlit as st
 
 from app.ui import (
@@ -37,8 +39,7 @@ def render(service: LeagueService):
     if "fixture_predictions" not in st.session_state:
         st.session_state["fixture_predictions"] = {}
 
-    _render_filters(matches, service)
-    filtered = _apply_filters(matches)
+    filtered = _render_filters(matches, service)
 
     if not filtered:
         st.info("No fixtures match the selected filters.")
@@ -64,43 +65,79 @@ def _render_filters(matches: List[Dict[str, Any]], service: LeagueService):
     rounds = sorted({m.get("round", "") for m in matches if m.get("round")})
     dates = sorted({_parse_date(m) for m in matches if m.get("date")})
 
-    if st.button("🔮 Predict All Displayed", type="primary", use_container_width=True):
-        predictions = st.session_state["fixture_predictions"]
-        to_predict = [m for m in _apply_filters(matches) if m.get("status") == "scheduled"]
-        for m in to_predict:
-            pred = service.predict(m["home_team"], m["away_team"])
-            pred["predicted_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            predictions[m["match_id"]] = pred
-        st.success(f"Predicted {len(to_predict)} displayed matches")
-        st.rerun()
-
     c1, c2, c3 = st.columns([2, 2, 1])
     with c1:
         options = ["All rounds"] + rounds
+        if "fixtures_round" in st.session_state and st.session_state["fixtures_round"] not in options:
+            st.session_state["fixtures_round"] = "All rounds"
         st.selectbox("🏟️ Round", options, key="fixtures_round")
     with c2:
         if dates:
             today = date.today()
+            default_date = today
+            scheduled_dates = sorted(
+                {
+                    _parse_date(m)
+                    for m in matches
+                    if m.get("status") == "scheduled" and m.get("date")
+                }
+            )
+            if scheduled_dates:
+                future_or_today = [d for d in scheduled_dates if d >= today]
+                if future_or_today:
+                    default_date = future_or_today[0]
+                else:
+                    default_date = scheduled_dates[-1]
+            min_value = min(today, dates[0])
+            max_value = max(today, dates[-1])
+            if "fixtures_date" in st.session_state:
+                stored = st.session_state["fixtures_date"]
+                try:
+                    stored_date = stored if isinstance(stored, date) else stored.date()
+                    if not (min_value <= stored_date <= max_value):
+                        st.session_state["fixtures_date"] = default_date
+                except Exception:
+                    st.session_state["fixtures_date"] = default_date
             st.date_input(
                 "📅 Date",
-                value=today,
-                min_value=min(today, dates[0]),
-                max_value=max(today, dates[-1]),
+                value=default_date,
+                min_value=min_value,
+                max_value=max_value,
                 key="fixtures_date",
             )
     with c3:
+        st.checkbox("🔮 Show all upcoming", value=False, key="fixtures_show_all_upcoming")
         st.checkbox("🕓 Show completed", value=False, key="fixtures_show_completed")
+
+    filtered = _apply_filters(matches)
+
+    if filtered:
+        if st.button("🔮 Predict All Displayed", type="primary", use_container_width=True):
+            predictions = st.session_state["fixture_predictions"]
+            all_scheduled = [m for m in filtered if m.get("status") == "scheduled"]
+            to_predict = all_scheduled[:MAX_BATCH_PREDICTIONS]
+            for m in to_predict:
+                pred = service.predict(m["home_team"], m["away_team"])
+                pred["predicted_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                predictions[m["match_id"]] = pred
+            msg = f"Predicted {len(to_predict)} displayed matches"
+            if len(all_scheduled) > MAX_BATCH_PREDICTIONS:
+                msg += f" (capped at {MAX_BATCH_PREDICTIONS})"
+            st.success(msg)
 
     if st.session_state["fixture_predictions"]:
         if st.button("🗑️ Clear predictions", use_container_width=True):
             st.session_state["fixture_predictions"] = {}
             st.rerun()
 
+    return filtered
+
 
 def _apply_filters(matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     round_filter = st.session_state.get("fixtures_round", "All rounds")
     date_filter = st.session_state.get("fixtures_date", None)
     show_completed = st.session_state.get("fixtures_show_completed", False)
+    show_all_upcoming = st.session_state.get("fixtures_show_all_upcoming", False)
 
     filtered = matches
     if round_filter != "All rounds":
@@ -111,6 +148,11 @@ def _apply_filters(matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             filtered = [m for m in filtered if _parse_date(m) == d]
         except Exception:
             pass
+
+    if show_all_upcoming:
+        upcoming = [m for m in filtered if m.get("status") == "scheduled"]
+        upcoming.sort(key=lambda m: m.get("date") or "")
+        return upcoming
 
     upcoming = [m for m in filtered if m.get("status") == "scheduled"]
     completed = [m for m in filtered if m.get("status") == "full_time"]

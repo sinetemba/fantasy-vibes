@@ -84,5 +84,44 @@
       "league_id": "4334",
       "season": "2026-2027"
     }
+  },
+  "PSL": {
+    "name": "South African PSL",
+    "country": "South Africa",
+    "psl_scraper": {},
+    "thesportsdb": {
+      "league_id": "4802",
+      "season": "2026-2027"
+    }
+  },
+  "CL": {
+    "name": "UEFA Champions League",
+    "country": "Europe",
+    "football_data": {
+      "code": "CL",
+      "season": "2026"
+    },
+    "fixturedownload": {
+      "slug": "champions-league",
+      "season": "2026",
+      "historical": ["2025", "2024", "2023"]
+    },
+    "thesportsdb": {
+      "league_id": "4480",
+      "season": "2026-2027"
+    }
+  },
+  "EL": {
+    "name": "UEFA Europa League",
+    "country": "Europe",
+    "fixturedownload": {
+      "slug": "europa-league",
+      "season": "2026",
+      "historical": ["2025", "2024", "2023"]
+    },
+    "thesportsdb": {
+      "league_id": "4481",
+      "season": "2026-2027"
+    }
   }
 }

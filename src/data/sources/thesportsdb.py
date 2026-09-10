@@ -52,12 +52,24 @@ class TheSportsDBSource(DataSource):
         if not league_id:
             return []
         season_param = season or cfg.get("season", "")
-        url = f"{self._base_url()}/eventsseason.php?id={league_id}&s={season_param}"
-        data = cached_get(url, ttl_seconds=3600)
-        if not data:
-            return []
+        season_url = f"{self._base_url()}/eventsseason.php?id={league_id}&s={season_param}"
+        data = cached_get(season_url, ttl_seconds=3600)
 
-        events = data.get("events") or []
+        events = []
+        if data:
+            events = data.get("events") or []
+
+        # For the current season, also fetch upcoming fixtures which are sometimes
+        # not included in the full-season response (e.g. UEFA competitions).
+        if season_param and season_param == cfg.get("season"):
+            next_url = f"{self._base_url()}/eventsnextleague.php?id={league_id}"
+            next_data = cached_get(next_url, ttl_seconds=1800)
+            if next_data:
+                seen = {e.get("idEvent") for e in events}
+                for e in next_data.get("events") or []:
+                    if e.get("idEvent") and e.get("idEvent") not in seen:
+                        events.append(e)
+
         matches = []
         for e in events:
             status = STATUS_MAP.get(e.get("strStatus"), "scheduled")

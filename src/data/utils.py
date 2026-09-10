@@ -27,8 +27,8 @@ CACHE_DIR.mkdir(parents=True, exist_ok=True)
 DEFAULT_TIMEOUT = 20
 
 
-def _cache_key(url: str) -> str:
-    return hashlib.sha256(url.encode()).hexdigest() + ".json"
+def _cache_key(url: str, ext: str = ".json") -> str:
+    return hashlib.sha256(url.encode()).hexdigest() + ext
 
 
 def _is_cache_valid(cache_path: Path, ttl_seconds: int) -> bool:
@@ -46,32 +46,40 @@ def cached_get(
     headers: Optional[Dict[str, str]] = None,
     ttl_seconds: int = 3600,
     timeout: int = DEFAULT_TIMEOUT,
-) -> Optional[Dict[str, Any]]:
+    raw: bool = False,
+) -> Any:
     """
-    Perform a GET request with a simple on-disk JSON cache.
+    Perform a GET request with a simple on-disk cache.
 
     Args:
         url: URL to fetch.
         headers: Optional request headers.
         ttl_seconds: Cache time-to-live.
         timeout: Request timeout.
+        raw: If True, return the response text instead of parsed JSON.
 
     Returns:
-        Parsed JSON dict or None if the request fails.
+        Parsed JSON dict, response text, or None if the request fails.
     """
-    key = _cache_key(url)
+    ext = ".txt" if raw else ".json"
+    key = _cache_key(url, ext=ext)
     cache_path = CACHE_DIR / key
 
     if _is_cache_valid(cache_path, ttl_seconds):
         try:
             with open(cache_path, "r", encoding="utf-8") as f:
-                return json.load(f)
+                return f.read() if raw else json.load(f)
         except Exception:
             pass
 
     try:
         response = requests.get(url, headers=headers, timeout=timeout)
         response.raise_for_status()
+        if raw:
+            data = response.text
+            with open(cache_path, "w", encoding="utf-8") as f:
+                f.write(data)
+            return data
         data = response.json()
         with open(cache_path, "w", encoding="utf-8") as f:
             json.dump(data, f)
@@ -82,7 +90,7 @@ def cached_get(
         if cache_path.exists():
             try:
                 with open(cache_path, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    return f.read() if raw else json.load(f)
             except Exception:
                 pass
     return None

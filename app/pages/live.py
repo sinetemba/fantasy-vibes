@@ -52,7 +52,7 @@ def render(service: LeagueService):
         show_warning_message("No match data available for this league.")
         return
 
-    live = [m for m in matches if m.get("status") == "live"]
+    live = service.get_live_matches()
     full_time = [m for m in matches if m.get("status") == "full_time"]
     scheduled = [m for m in matches if m.get("status") == "scheduled"]
 

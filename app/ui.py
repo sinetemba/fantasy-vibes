@@ -137,20 +137,47 @@ DARK_CSS = """
         border: 1px solid #00ff85 !important;
     }
 
-    /* Selectbox dropdown in sidebar */
-    [data-testid="stSidebar"] [data-baseweb="select"] [role="listbox"] {
-        background-color: #1f2833 !important;
-        border: 1px solid #37003c !important;
-    }
-    [data-testid="stSidebar"] [data-baseweb="select"] [role="option"] {
-        color: #f5f6f7 !important;
-        background-color: #1f2833 !important;
-    }
-    [data-testid="stSidebar"] [data-baseweb="select"] [role="option"]:hover {
-        background-color: rgba(0, 255, 133, 0.2) !important;
-    }
+    /* Selected selectbox value and options */
+    [data-testid="stSelectbox"] div[data-baseweb="select"] div,
+    [data-testid="stSelectbox"] div[data-baseweb="select"] span,
+    [data-testid="stSelectbox"] div[data-baseweb="select"] input,
+    [data-testid="stSidebar"] [data-baseweb="select"] div,
+    [data-testid="stSidebar"] [data-baseweb="select"] span,
     [data-testid="stSidebar"] [data-baseweb="select"] input {
+        color: #000000 !important;
+        font-weight: 900 !important;
+        text-shadow: 0 0 2px #f5f6f7 !important;
+    }
+    ul[data-testid="stSelectboxVirtualDropdown"] li[role="option"][aria-selected="true"],
+    ul[data-testid="stSelectboxVirtualDropdown"] li[role="option"][aria-selected="true"] *,
+    [data-testid="stSelectboxVirtualDropdown"] [role="option"][aria-selected="true"],
+    [data-testid="stSelectboxVirtualDropdown"] [role="option"][aria-selected="true"] * {
+        color: #000000 !important;
+        background-color: #00ff85 !important;
+        font-weight: 900 !important;
+    }
+    [data-testid="stSidebar"] [data-baseweb="select"] [role="option"][aria-selected="true"],
+    [data-testid="stSidebar"] [data-baseweb="select"] [role="option"][aria-selected="true"] * {
+        color: #000000 !important;
+        background-color: #00ff85 !important;
+        font-weight: 900 !important;
+    }
+    ul[data-testid="stSelectboxVirtualDropdown"] li[role="option"],
+    ul[data-testid="stSelectboxVirtualDropdown"] li[role="option"] *,
+    [data-testid="stSelectboxVirtualDropdown"] [role="option"],
+    [data-testid="stSelectboxVirtualDropdown"] [role="option"] *,
+    [data-testid="stSidebar"] [data-baseweb="select"] [role="option"],
+    [data-testid="stSidebar"] [data-baseweb="select"] [role="option"] * {
         color: #f5f6f7 !important;
+        background-color: #1f2833 !important;
+    }
+    ul[data-testid="stSelectboxVirtualDropdown"] li[role="option"]:hover,
+    ul[data-testid="stSelectboxVirtualDropdown"] li[role="option"]:hover *,
+    [data-testid="stSelectboxVirtualDropdown"] [role="option"]:hover,
+    [data-testid="stSelectboxVirtualDropdown"] [role="option"]:hover *,
+    [data-testid="stSidebar"] [data-baseweb="select"] [role="option"]:hover,
+    [data-testid="stSidebar"] [data-baseweb="select"] [role="option"]:hover * {
+        background-color: rgba(0, 255, 133, 0.2) !important;
     }
 
     /* Group table (used for standings) */

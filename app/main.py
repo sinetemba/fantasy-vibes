@@ -1,12 +1,15 @@
 """Main entry point for the Fantasy Vibes multi-league football app."""
 
+import json
 import logging
 import sys
 from pathlib import Path
+from typing import Any, Dict
 
 import streamlit as st
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PREFERENCES_PATH = PROJECT_ROOT / "data" / "cache" / "preferences.json"
 sys.path.insert(0, str(PROJECT_ROOT))
 
 try:
@@ -42,6 +45,30 @@ PAGES = {
 }
 
 
+def _load_preferences() -> Dict[str, Any]:
+    try:
+        with open(PREFERENCES_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_preferences():
+    try:
+        PREFERENCES_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(PREFERENCES_PATH, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "last_league": st.session_state.get("last_league"),
+                    "favourite_team": st.session_state.get("favourite_team"),
+                },
+                f,
+                indent=2,
+            )
+    except Exception:
+        pass
+
+
 def init_session_state():
     if "league_service" not in st.session_state:
         default = _default_league_code()
@@ -51,11 +78,15 @@ def init_session_state():
     if "last_league" not in st.session_state:
         st.session_state.last_league = st.session_state.league_service.get_current_code()
     if "favourite_team" not in st.session_state:
-        st.session_state.favourite_team = st.query_params.get("fav")
+        prefs = _load_preferences()
+        teams = st.session_state.league_service.get_teams()
+        fav = st.query_params.get("fav") or prefs.get("favourite_team")
+        st.session_state.favourite_team = fav if fav in teams else (teams[0] if teams else None)
 
 
 def _default_league_code() -> str:
-    candidate = st.query_params.get("league")
+    prefs = _load_preferences()
+    candidate = st.query_params.get("league") or prefs.get("last_league")
     try:
         service = LeagueService()
         codes = [c for c, _ in service.get_leagues()]
@@ -75,6 +106,7 @@ def _change_league():
         st.session_state.league_service.set_league(new_code)
         st.session_state.last_league = new_code
         st.query_params["league"] = new_code
+        _save_preferences()
         st.rerun()
 
 
@@ -83,6 +115,7 @@ def _change_favourite():
     if new_fav:
         st.session_state.favourite_team = new_fav
         st.query_params["fav"] = new_fav
+        _save_preferences()
 
 
 def render_sidebar():
