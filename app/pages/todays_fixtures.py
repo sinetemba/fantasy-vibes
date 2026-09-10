@@ -12,7 +12,6 @@ from app.ui import (
     display_disclaimer,
     display_header,
     match_card_html,
-    show_info_message,
 )
 from src.data import LeagueService
 
@@ -67,6 +66,9 @@ def render(service: LeagueService):
         subtitle = f"All leagues - {today_str}"
     display_header("Today's Fixtures", subtitle)
 
+    if not matches:
+        return
+
     c1, c2 = st.columns([4, 1])
     with c1:
         st.markdown("Fixture list aggregated across all configured leagues for the current day.")
@@ -74,10 +76,6 @@ def render(service: LeagueService):
         if st.button("🔄 Refresh", use_container_width=True):
             _clear_cache()
             st.rerun()
-
-    if not matches:
-        show_info_message("No fixtures scheduled for today across the configured leagues.")
-        return
 
     live_count = sum(1 for m in matches if m.get("status") == "live")
     done_count = sum(1 for m in matches if m.get("status") == "full_time")
