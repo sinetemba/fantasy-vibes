@@ -48,6 +48,8 @@ class LeagueService:
         self._current_league = None
         self.matches: List[Dict[str, Any]] = []
         self._historical_matches: List[Dict[str, Any]] = []
+        self._related: Dict[str, Dict[str, Any]] = {}
+        self._team_contexts: Dict[str, Dict[str, Any]] = {}
         self.standings: List[Dict[str, Any]] = []
         self._match_source_name = None
         self._standings_source_name = None
@@ -116,14 +118,102 @@ class LeagueService:
                 except Exception:
                     pass
 
+        # Tag every match with its competition so the engine can track
+        # per-tournament form (e.g. domestic league vs Champions League).
+        for m in self.matches:
+            m.setdefault("competition", self._current_code)
+        for m in self._historical_matches:
+            m.setdefault("competition", self._current_code)
+
+        # Pull related competitions (e.g. the domestic leagues of CL/EL clubs)
+        # so predictions can use each team's own log position and other-
+        # tournament form.
+        self._related = self._load_related()
+
         self._load_or_fit_model()
+        self._team_contexts = self._build_team_contexts()
+
+    def _load_related(self) -> Dict[str, Dict[str, Any]]:
+        """Fetch matches and standings for leagues listed in `related`."""
+        related: Dict[str, Dict[str, Any]] = {}
+        for code in self._current_league.get("related", []):
+            cfg = self._leagues.get(code)
+            if not cfg:
+                continue
+            try:
+                matches = self._source.get_matches(cfg)
+            except Exception as exc:
+                logger.warning(f"Related league {code} matches failed: {exc}")
+                matches = []
+            for m in matches:
+                m["competition"] = code
+            try:
+                table = self._source.get_standings(cfg)
+            except Exception as exc:
+                logger.warning(f"Related league {code} standings failed: {exc}")
+                table = []
+            if not table and matches:
+                table = self._compute_table(matches)
+            related[code] = {"matches": matches, "standings": table}
+        return related
+
+    def _build_team_contexts(self) -> Dict[str, Dict[str, Any]]:
+        """Per-team log context: position, league size and points-per-game."""
+        contexts: Dict[str, Dict[str, Any]] = {}
+
+        standings = self.get_standings()
+        size = len(standings)
+        for row in standings:
+            played = row.get("played") or 0
+            contexts[self._engine.resolve_name(row["team"])] = {
+                "position": row.get("position"),
+                "league_size": size,
+                "ppg": (row.get("points", 0) / played) if played else None,
+                "competition": self._current_code,
+            }
+
+        # Teams not in the current log (e.g. foreign CL/EL opponents) get the
+        # context of their domestic league log instead.
+        for code, data in self._related.items():
+            table = data["standings"]
+            if not table:
+                continue
+            names = {r["team"] for r in table}
+            by_name = {r["team"]: r for r in table}
+            for m in self.matches:
+                for team in (m.get("home_team"), m.get("away_team")):
+                    if not team:
+                        continue
+                    canonical = self._engine.resolve_name(team)
+                    if canonical in contexts:
+                        continue
+                    resolved = self._resolve_team(team, names)
+                    if resolved not in by_name:
+                        continue
+                    row = by_name[resolved]
+                    played = row.get("played") or 0
+                    contexts[canonical] = {
+                        "position": row.get("position"),
+                        "league_size": len(table),
+                        "ppg": (row.get("points", 0) / played) if played else None,
+                        "competition": code,
+                    }
+        return contexts
+
+    def refresh(self):
+        """Public helper to reload data and retrain the model."""
+        self._refresh()
 
     def _detect_source(self, sources: List[Any], method: str) -> Optional[str]:
         for s in sources:
             if not s.is_available(self._current_league):
                 continue
             fn = getattr(s, f"get_{method}")
-            data = fn(self._current_league)
+            try:
+                data = fn(self._current_league)
+            except Exception as exc:
+                logger.warning(f"Source {s.name} failed for {method}: {exc}")
+                continue
             if data:
                 return s.name
         return None
@@ -165,11 +255,12 @@ class LeagueService:
                 pass
         return [m for m in self.matches if m.get("status") == "live"]
 
-    def _compute_table_from_matches(self) -> List[Dict[str, Any]]:
+    @staticmethod
+    def _compute_table(matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         table: Dict[str, Dict[str, Any]] = {}
         all_teams = set()
 
-        for m in self.matches:
+        for m in matches:
             home = m.get("home_team")
             away = m.get("away_team")
             if not home or not away:
@@ -242,6 +333,9 @@ class LeagueService:
             rec["position"] = i
         return sorted_table
 
+    def _compute_table_from_matches(self) -> List[Dict[str, Any]]:
+        return self._compute_table(self.matches)
+
     def get_standings(self) -> List[Dict[str, Any]]:
         if not self.standings:
             return self._compute_table_from_matches()
@@ -250,7 +344,16 @@ class LeagueService:
     def _resolve_team(self, team: str, pool: Set[str]) -> str:
         if team in pool:
             return team
-        matches = difflib.get_close_matches(team, pool, n=1, cutoff=0.6)
+        # Cross-source canonical names (e.g. "Arsenal FC" -> "Arsenal").
+        resolved = self._engine.resolve_name(team)
+        if resolved in pool:
+            return resolved
+        # Case-insensitive exact match as a cheap normalisation step.
+        team_lower = team.lower().strip()
+        for t in pool:
+            if t.lower().strip() == team_lower:
+                return t
+        matches = difflib.get_close_matches(team, pool, n=1, cutoff=0.75)
         return matches[0] if matches else team
 
     def get_team_stats(self, team: str) -> Optional[Dict[str, Any]]:
@@ -361,6 +464,9 @@ class LeagueService:
         training = list(self.matches)
         if self._match_source_name != "openfootball" and self._historical_matches:
             training.extend(self._historical_matches)
+        # Other tournaments (e.g. domestic leagues of CL/EL clubs).
+        for data in self._related.values():
+            training.extend(data["matches"])
         self._engine = PredictionEngine()
         self._engine.fit(training)
         self._save_model()
@@ -369,14 +475,34 @@ class LeagueService:
         """Return a prediction from the currently trained model."""
         home = self._resolve_team(home_team, self._engine.teams)
         away = self._resolve_team(away_team, self._engine.teams)
-        return self._engine.predict(home, away, neutral)
+        contexts = {
+            home: self._team_contexts.get(home),
+            away: self._team_contexts.get(away),
+        }
+        return self._engine.predict(
+            home, away, neutral, competition=self._current_code, contexts=contexts
+        )
+
+    def _training_size(self) -> int:
+        related = sum(len(d["matches"]) for d in self._related.values())
+        return len(self.matches) + len(self._historical_matches) + related
 
     def train(self) -> Dict[str, Any]:
         """Force a fresh retrain and return model status."""
-        self._fit_model()
+        try:
+            self._fit_model()
+        except Exception as exc:
+            logger.warning(f"Model retraining failed: {exc}")
+            return {
+                "last_trained": None,
+                "matches_used": self._training_size(),
+                "teams_in_model": 0,
+                "fitted": False,
+                "error": str(exc),
+            }
         return {
             "last_trained": self._engine.last_trained,
-            "matches_used": len(self.matches) + len(self._historical_matches),
+            "matches_used": self._training_size(),
             "teams_in_model": len(self._engine.teams),
             "fitted": self._engine.fitted,
         }

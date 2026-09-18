@@ -1,6 +1,6 @@
 """Fixtures page with filters and per-match predictions."""
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from itertools import groupby
 from typing import Any, Dict, List
 
@@ -62,6 +62,12 @@ def _date_label(m: Dict[str, Any]) -> str:
 
 
 def _render_filters(matches: List[Dict[str, Any]], service: LeagueService):
+    current_code = service.get_current_code()
+    if st.session_state.get("fixtures_league") != current_code:
+        st.session_state["fixtures_league"] = current_code
+        st.session_state.pop("fixtures_date", None)
+        st.session_state.pop("fixtures_round", None)
+
     rounds = sorted({m.get("round", "") for m in matches if m.get("round")})
     dates = sorted({_parse_date(m) for m in matches if m.get("date")})
 
@@ -75,19 +81,6 @@ def _render_filters(matches: List[Dict[str, Any]], service: LeagueService):
         if dates:
             today = date.today()
             default_date = today
-            scheduled_dates = sorted(
-                {
-                    _parse_date(m)
-                    for m in matches
-                    if m.get("status") == "scheduled" and m.get("date")
-                }
-            )
-            if scheduled_dates:
-                future_or_today = [d for d in scheduled_dates if d >= today]
-                if future_or_today:
-                    default_date = future_or_today[0]
-                else:
-                    default_date = scheduled_dates[-1]
             min_value = min(today, dates[0])
             max_value = max(today, dates[-1])
             if "fixtures_date" in st.session_state:
@@ -106,13 +99,14 @@ def _render_filters(matches: List[Dict[str, Any]], service: LeagueService):
                 key="fixtures_date",
             )
     with c3:
+        st.checkbox("🗓️ This week's fixtures", value=False, key="fixtures_this_week")
         st.checkbox("🔮 Show all upcoming", value=False, key="fixtures_show_all_upcoming")
         st.checkbox("🕓 Show completed", value=False, key="fixtures_show_completed")
 
     filtered = _apply_filters(matches)
 
     if filtered:
-        if st.button("🔮 Predict All Displayed", type="primary", use_container_width=True):
+        if st.button(f"🔮 Predict first {MAX_BATCH_PREDICTIONS} scheduled", type="primary", use_container_width=True):
             predictions = st.session_state["fixture_predictions"]
             all_scheduled = [m for m in filtered if m.get("status") == "scheduled"]
             to_predict = all_scheduled[:MAX_BATCH_PREDICTIONS]
@@ -138,10 +132,23 @@ def _apply_filters(matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     date_filter = st.session_state.get("fixtures_date", None)
     show_completed = st.session_state.get("fixtures_show_completed", False)
     show_all_upcoming = st.session_state.get("fixtures_show_all_upcoming", False)
+    this_week = st.session_state.get("fixtures_this_week", False)
 
     filtered = matches
     if round_filter != "All rounds":
         filtered = [m for m in filtered if m.get("round") == round_filter]
+
+    if this_week:
+        # Everything in the 7-day window starting today, regardless of status.
+        start = date.today()
+        end = start + timedelta(days=6)
+        filtered = [
+            m for m in filtered
+            if m.get("date") and start <= _parse_date(m) <= end
+        ]
+        filtered.sort(key=lambda m: m.get("date") or "")
+        return filtered
+
     if date_filter:
         try:
             d = date_filter if isinstance(date_filter, date) else date_filter.date()
@@ -225,8 +232,39 @@ def _render_prediction_summary(pred: Dict[str, Any], home: str, away: str):
                 unsafe_allow_html=True,
             )
         with c_bars:
-            probability_bar(f"🏠 {home}", outcome.get("home_win", 0), COLORS["home_win"])
-            probability_bar("🤝 Draw", outcome.get("draw", 0), COLORS["draw"])
-            probability_bar(f"✈️ {away}", outcome.get("away_win", 0), COLORS["away_win"])
+            home_win = outcome.get("home_win", 0)
+            away_win = outcome.get("away_win", 0)
+            draw = outcome.get("draw", 0)
+            if home_win >= away_win:
+                home_color, away_color = COLORS["home_win"], COLORS["away_win"]
+            else:
+                home_color, away_color = COLORS["away_win"], COLORS["home_win"]
+            probability_bar(f"🏠 {home}", home_win, home_color)
+            probability_bar("🤝 Draw", draw, COLORS["draw"])
+            probability_bar(f"✈️ {away}", away_win, away_color)
+    factors = _format_model_inputs(pred, home, away)
+    if factors:
+        st.caption(factors)
     if pred.get("predicted_at"):
         st.caption(f"Predicted on {pred['predicted_at']}")
+
+
+def _format_model_inputs(pred: Dict[str, Any], home: str, away: str) -> str:
+    """Summarise the form/log-position factors behind a prediction."""
+    inputs = pred.get("model_inputs") or {}
+
+    def _fmt(team: str, info: Dict[str, Any]) -> str:
+        parts = []
+        pos, league = info.get("position"), info.get("context_league")
+        if pos and league:
+            parts.append(f"#{pos} in {league}")
+        if info.get("form_ppg") is not None:
+            parts.append(f"{info['form_ppg']:.1f} pts/game")
+        comp_ppg = info.get("comp_form_ppg")
+        comp = info.get("competition")
+        if comp_ppg is not None and comp and comp != league:
+            parts.append(f"{comp_ppg:.1f} in {comp}")
+        return f"{team}: " + " · ".join(parts) if parts else ""
+
+    bits = [_fmt(home, inputs.get("home") or {}), _fmt(away, inputs.get("away") or {})]
+    return "  |  ".join(b for b in bits if b)

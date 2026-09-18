@@ -92,8 +92,8 @@ def _display_prediction(pred, service: LeagueService):
             f"""
             <div style="text-align:center; padding:1rem;">
                 <div style="font-size:0.9rem; color:#a0a0a0;">Predicted Score</div>
-                <div style="font-size:2.5rem; font-weight:800; color:#00ff85;">{score['score']}</div>
-                <div style="font-size:0.8rem; color:#a0a0a0;">{score['probability']*100:.1f}% likelihood · {pred['model']}</div>
+                <div style="font-size:2.5rem; font-weight:800; color:#00ff85;">{score.get('score', '—')}</div>
+                <div style="font-size:0.8rem; color:#a0a0a0;">{score.get('probability', 0)*100:.1f}% likelihood · {pred.get('model', '')}</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -106,22 +106,22 @@ def _display_prediction(pred, service: LeagueService):
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        st.metric(f"⚽ {home} xG", f"{expected['home']:.2f}")
+        st.metric(f"⚽ {home} xG", f"{expected.get('home', 0):.2f}")
     with c2:
-        st.metric("⚽ Total xG", f"{expected['home'] + expected['away']:.2f}")
+        st.metric("⚽ Total xG", f"{expected.get('home', 0) + expected.get('away', 0):.2f}")
     with c3:
-        st.metric(f"⚽ {away} xG", f"{expected['away']:.2f}")
+        st.metric(f"⚽ {away} xG", f"{expected.get('away', 0):.2f}")
 
     st.markdown("---")
     st.markdown("### 📊 Outcome Probabilities")
     cb, cp = st.columns([3, 2])
     with cb:
-        probability_bar(f"🏠 {home}", outcome["home_win"], COLORS["home_win"])
-        probability_bar("🤝 Draw", outcome["draw"], COLORS["draw"])
-        probability_bar(f"✈️ {away}", outcome["away_win"], COLORS["away_win"])
-        st.plotly_chart(create_outcome_bars(outcome["home_win"], outcome["draw"], outcome["away_win"]), use_container_width=True)
+        probability_bar(f"🏠 {home}", outcome.get("home_win", 0), COLORS["home_win"])
+        probability_bar("🤝 Draw", outcome.get("draw", 0), COLORS["draw"])
+        probability_bar(f"✈️ {away}", outcome.get("away_win", 0), COLORS["away_win"])
+        st.plotly_chart(create_outcome_bars(outcome.get("home_win", 0), outcome.get("draw", 0), outcome.get("away_win", 0)), use_container_width=True)
     with cp:
-        st.plotly_chart(create_outcome_pie_chart(outcome["home_win"], outcome["draw"], outcome["away_win"]), use_container_width=True)
+        st.plotly_chart(create_outcome_pie_chart(outcome.get("home_win", 0), outcome.get("draw", 0), outcome.get("away_win", 0)), use_container_width=True)
 
     st.markdown("---")
     st.markdown("### 📋 Markets")
@@ -145,12 +145,28 @@ def _display_prediction(pred, service: LeagueService):
 
     st.markdown("---")
     st.markdown("### 📈 Attack / Defense Ratings")
+    attack = pred.get("team_attack_params", {})
+    defense = pred.get("team_defense_params", {})
     a1, a2 = st.columns(2)
     with a1:
-        st.metric(f"{home} attack", f"{pred['team_attack_params']['home']:.3f}")
-        st.metric(f"{home} defense", f"{pred['team_defense_params']['home']:.3f}")
+        st.metric(f"{home} attack", f"{attack.get('home', 1.0):.3f}")
+        st.metric(f"{home} defense", f"{defense.get('home', 1.0):.3f}")
     with a2:
-        st.metric(f"{away} attack", f"{pred['team_attack_params']['away']:.3f}")
-        st.metric(f"{away} defense", f"{pred['team_defense_params']['away']:.3f}")
+        st.metric(f"{away} attack", f"{attack.get('away', 1.0):.3f}")
+        st.metric(f"{away} defense", f"{defense.get('away', 1.0):.3f}")
+
+    inputs = pred.get("model_inputs") or {}
+    for label, info in ((home, inputs.get("home") or {}), (away, inputs.get("away") or {})):
+        bits = []
+        if info.get("position") and info.get("context_league"):
+            bits.append(f"#{info['position']} in {info['context_league']}")
+        if info.get("form_ppg") is not None:
+            bits.append(f"{info['form_ppg']:.1f} pts/game")
+        comp_ppg = info.get("comp_form_ppg")
+        comp = info.get("competition")
+        if comp_ppg is not None and comp and comp != info.get("context_league"):
+            bits.append(f"{comp_ppg:.1f} in {comp}")
+        if bits:
+            st.caption(f"{label}: " + " · ".join(bits))
 
     st.caption(f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")

@@ -10,7 +10,9 @@ swappable, multi-source data layer so new leagues and providers can be added eas
 - 📡 **Multiple free data sources** — football-data.org, thesportsdb.com and the public
   `openfootball/football.json` dataset.
 - 🌙 **Night mode UI** — dark theme by default with custom cards and Plotly charts.
-- 🔮 **Match predictions** — attack/defense ratings + Poisson model, with neutral-venue toggle.
+- 🔮 **Match predictions** — attack/defense ratings + Poisson/Elo blend, recent form,
+  league-log position and cross-tournament form (e.g. domestic form for CL/EL clubs),
+  with neutral-venue toggle.
 - 📅 **Fixtures** — full schedule, filter by round/date, predict any match.
 - 📊 **Table & stats** — standings, team form, head-to-head and league trend charts.
 

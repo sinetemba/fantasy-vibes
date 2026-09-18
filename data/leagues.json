@@ -97,6 +97,7 @@
   "CL": {
     "name": "UEFA Champions League",
     "country": "Europe",
+    "related": ["PL", "PD", "SA", "BL1", "FL1"],
     "football_data": {
       "code": "CL",
       "season": "2026"
@@ -114,6 +115,7 @@
   "EL": {
     "name": "UEFA Europa League",
     "country": "Europe",
+    "related": ["PL", "PD", "SA", "BL1", "FL1"],
     "fixturedownload": {
       "slug": "europa-league",
       "season": "2026",
@@ -121,6 +123,14 @@
     },
     "thesportsdb": {
       "league_id": "4481",
+      "season": "2026-2027"
+    }
+  },
+  "MLS": {
+    "name": "Major League Soccer",
+    "country": "USA",
+    "thesportsdb": {
+      "league_id": "4346",
       "season": "2026-2027"
     }
   }

@@ -2,8 +2,10 @@
 
 import logging
 import math
+import re
+from collections import Counter
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -26,6 +28,27 @@ def _draw_prob(elo_diff: float) -> float:
 
 
 RECENCY_HALF_LIFE_DAYS = 180.0
+
+# Tuning weights for the context (log position / points-per-game) adjustment.
+POSITION_WEIGHT = 0.24
+PPG_WEIGHT = 0.20
+CONTEXT_FACTOR_MIN = 0.85
+CONTEXT_FACTOR_MAX = 1.20
+
+# Tokens that carry no identity when comparing club names across sources,
+# e.g. "Arsenal FC" vs "Arsenal" or "Real Madrid CF" vs "Real Madrid".
+TEAM_STOP_TOKENS = {
+    "fc", "afc", "cf", "sc", "ac", "as", "ssc", "fk", "sk", "bk", "if",
+    "bv", "sv", "cd", "ud", "rc", "rcd", "ogc", "tsg", "vfl", "vfb", "fsv",
+    "club", "the", "de",
+}
+
+
+def _norm_key(name: str) -> str:
+    """Normalise a team name for cross-source / cross-competition matching."""
+    tokens = re.sub(r"[^a-z0-9 ]", " ", name.lower()).split()
+    tokens = [t for t in tokens if t not in TEAM_STOP_TOKENS and not t.isdigit()]
+    return " ".join(tokens) or name.lower().strip()
 
 
 def _weighted_avg(values: np.ndarray, weights: np.ndarray) -> float:
@@ -52,6 +75,8 @@ class PredictionEngine:
         self.away_defense: Dict[str, float] = {}
         self.elo: Dict[str, float] = {}
         self.form_ppg: Dict[str, float] = {}
+        self.comp_form_ppg: Dict[str, float] = {}
+        self.name_index: Dict[str, str] = {}
         self.teams: set = set()
 
     def fit(self, matches: List[Dict[str, Any]]) -> None:
@@ -68,6 +93,17 @@ class PredictionEngine:
         df = pd.DataFrame(records)
         df["date"] = pd.to_datetime(df["date"], utc=True, errors="coerce")
         df = df.dropna(subset=["home_score", "away_score", "date"])
+        if "competition" not in df.columns:
+            df["competition"] = "default"
+        df["competition"] = df["competition"].fillna("default")
+
+        # Canonicalise team names so the same club is merged across sources
+        # and competitions (e.g. "Arsenal FC" in one feed, "Arsenal" in another).
+        name_map = self._canonical_map(
+            df["home_team"].tolist() + df["away_team"].tolist()
+        )
+        df["home_team"] = df["home_team"].map(name_map)
+        df["away_team"] = df["away_team"].map(name_map)
 
         self.teams = set(df["home_team"].unique()) | set(df["away_team"].unique())
 
@@ -105,6 +141,54 @@ class PredictionEngine:
         self.last_trained = datetime.now().isoformat()
         logger.info(f"PredictionEngine trained on {len(df)} matches")
 
+    def _canonical_map(self, names: List[str]) -> Dict[str, str]:
+        """Map raw team names to canonical names shared across sources."""
+        counts = Counter(names)
+        key_to_names: Dict[str, List[str]] = {}
+        for name in counts:
+            key_to_names.setdefault(_norm_key(name), []).append(name)
+
+        # Merge keys where one is a token-prefix of the other
+        # (e.g. "tottenham" and "tottenham hotspur").
+        keys = sorted(key_to_names, key=len)
+        merged: Dict[str, str] = {}
+        for key in keys:
+            target = key
+            for shorter in keys:
+                if len(shorter) >= len(key):
+                    break
+                if key.startswith(shorter + " "):
+                    target = merged.get(shorter, shorter)
+                    break
+            merged[key] = target
+
+        # Group raw names by their merged key and pick one canonical name per
+        # group (the most frequent raw variant).
+        groups: Dict[str, List[str]] = {}
+        for key, canonical_key in merged.items():
+            groups.setdefault(canonical_key, []).extend(key_to_names[key])
+
+        name_map: Dict[str, str] = {}
+        self.name_index = {}
+        for canonical_key, raws in groups.items():
+            canonical = max(raws, key=lambda n: counts[n])
+            for raw in raws:
+                name_map[raw] = canonical
+                self.name_index[raw] = canonical
+            self.name_index[canonical_key] = canonical
+        return name_map
+
+    def resolve_name(self, name: str) -> str:
+        """Resolve a raw team name to the canonical model name."""
+        if name in self.teams:
+            return name
+        if name in self.name_index:
+            return self.name_index[name]
+        key = _norm_key(name)
+        if key in self.name_index:
+            return self.name_index[key]
+        return name
+
     def _fit_elo(self, df: pd.DataFrame, k: float = 30.0, home_field: float = 70.0):
         self.elo = {t: 1500.0 for t in self.teams}
         for _, row in df.sort_values("date").iterrows():
@@ -129,10 +213,12 @@ class PredictionEngine:
         for t in self.teams:
             self.elo.setdefault(t, 1500.0)
 
-    def _fit_form(self, df: pd.DataFrame, n: int = 10):
+    def _fit_form(self, df: pd.DataFrame, n: int = 10, comp_n: int = 6):
         form: Dict[str, List[Dict[str, Any]]] = {t: [] for t in self.teams}
+        comp_form: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
         for _, row in df.sort_values("date").iterrows():
             home, away = row["home_team"], row["away_team"]
+            comp = row.get("competition") or "default"
             hs, aws = row["home_score"], row["away_score"]
             if hs > aws:
                 home_pts, away_pts = 3, 0
@@ -140,8 +226,11 @@ class PredictionEngine:
                 home_pts, away_pts = 1, 1
             else:
                 home_pts, away_pts = 0, 3
-            form[home].append({"pts": home_pts, "weight": row.get("weight", 1.0)})
-            form[away].append({"pts": away_pts, "weight": row.get("weight", 1.0)})
+            weight = row.get("weight", 1.0)
+            form[home].append({"pts": home_pts, "weight": weight})
+            form[away].append({"pts": away_pts, "weight": weight})
+            comp_form.setdefault((comp, home), []).append({"pts": home_pts, "weight": weight})
+            comp_form.setdefault((comp, away), []).append({"pts": away_pts, "weight": weight})
 
         self.form_ppg = {}
         for t, entries in form.items():
@@ -154,19 +243,65 @@ class PredictionEngine:
             avg_pts = _weighted_avg(pts, weights)
             self.form_ppg[t] = avg_pts / 3.0
 
-    def _form_factor(self, team: str) -> float:
-        ppg = self.form_ppg.get(team, 0.5)
+        # Form within each competition (how a club played in that tournament).
+        self.comp_form_ppg = {}
+        for (comp, t), entries in comp_form.items():
+            recent = entries[-comp_n:]
+            pts = np.array([e["pts"] for e in recent], dtype=float)
+            weights = np.array([e["weight"] for e in recent], dtype=float)
+            self.comp_form_ppg[f"{comp}|{t}"] = _weighted_avg(pts, weights) / 3.0
+
+    def _form_factor(self, team: str, competition: Optional[str] = None) -> float:
+        overall = self.form_ppg.get(team, 0.5)
+        comp_ppg = self.comp_form_ppg.get(f"{competition}|{team}") if competition else None
+        # Blend same-tournament form with all-competition form when available.
+        ppg = overall if comp_ppg is None else 0.4 * overall + 0.6 * comp_ppg
         # Scale: +10% if perfect form, -10% if zero form
         return 1.0 + 0.2 * (ppg - 0.5)
 
-    def predict(self, home_team: str, away_team: str, neutral: bool = False) -> Dict[str, Any]:
+    @staticmethod
+    def _context_factor(ctx: Optional[Dict[str, Any]]) -> float:
+        """Adjust for a team's standing in its own league log."""
+        if not ctx:
+            return 1.0
+        factor = 1.0
+        pos = ctx.get("position")
+        size = ctx.get("league_size")
+        if pos and size and size >= 5:
+            strength = 1.0 - (pos - 1) / (size - 1)  # 1.0 top .. 0.0 bottom
+            factor *= 1.0 + POSITION_WEIGHT * (strength - 0.5)
+        ppg = ctx.get("ppg")
+        if ppg is not None:
+            factor *= 1.0 + PPG_WEIGHT * (ppg / 3.0 - 0.5)
+        return float(min(CONTEXT_FACTOR_MAX, max(CONTEXT_FACTOR_MIN, factor)))
+
+    def predict(
+        self,
+        home_team: str,
+        away_team: str,
+        neutral: bool = False,
+        competition: Optional[str] = None,
+        contexts: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        home_team = self.resolve_name(home_team)
+        away_team = self.resolve_name(away_team)
         if not self.fitted or home_team not in self.teams or away_team not in self.teams:
             return self._fallback(home_team, away_team)
 
-        home_attack = self.home_attack.get(home_team, 1.0) * self._form_factor(home_team)
-        home_defense = self.home_defense.get(home_team, 1.0) / self._form_factor(home_team)
-        away_attack = self.away_attack.get(away_team, 1.0) * self._form_factor(away_team)
-        away_defense = self.away_defense.get(away_team, 1.0) / self._form_factor(away_team)
+        contexts = contexts or {}
+        home_ctx = contexts.get(home_team)
+        away_ctx = contexts.get(away_team)
+
+        # Recent form (blended with same-tournament form) x log-position context.
+        home_factor = self._form_factor(home_team, competition) * self._context_factor(home_ctx)
+        away_factor = self._form_factor(away_team, competition) * self._context_factor(away_ctx)
+        home_factor = min(1.3, max(0.75, home_factor))
+        away_factor = min(1.3, max(0.75, away_factor))
+
+        home_attack = self.home_attack.get(home_team, 1.0) * home_factor
+        home_defense = self.home_defense.get(home_team, 1.0) / home_factor
+        away_attack = self.away_attack.get(away_team, 1.0) * away_factor
+        away_defense = self.away_defense.get(away_team, 1.0) / away_factor
 
         ha = 1.0 if neutral else self.home_advantage
         ah = 1.0 / ha
@@ -251,8 +386,34 @@ class PredictionEngine:
                 "home": round(self.home_defense.get(home_team, 1.0), 3),
                 "away": round(self.away_defense.get(away_team, 1.0), 3),
             },
+            "model_inputs": {
+                "home": self._describe_inputs(home_team, competition, home_ctx),
+                "away": self._describe_inputs(away_team, competition, away_ctx),
+            },
             "score_matrix": np.array(matrix),
             "last_trained": self.last_trained,
+        }
+
+    def _describe_inputs(
+        self,
+        team: str,
+        competition: Optional[str],
+        ctx: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Summarise the factors that went into a team's prediction."""
+        comp_key = f"{competition}|{team}"
+        return {
+            "form_ppg": round(self.form_ppg.get(team, 0.5) * 3.0, 2),
+            "competition": competition,
+            "comp_form_ppg": (
+                round(self.comp_form_ppg[comp_key] * 3.0, 2)
+                if comp_key in self.comp_form_ppg
+                else None
+            ),
+            "position": ctx.get("position") if ctx else None,
+            "league_size": ctx.get("league_size") if ctx else None,
+            "table_ppg": ctx.get("ppg") if ctx else None,
+            "context_league": ctx.get("competition") if ctx else None,
         }
 
     def _fallback(self, home_team: str, away_team: str) -> Dict[str, Any]:
@@ -290,6 +451,14 @@ class PredictionEngine:
             },
             "team_attack_params": {"home": 1.0, "away": 1.0},
             "team_defense_params": {"home": 1.0, "away": 1.0},
+            "model_inputs": {
+                "home": {"form_ppg": None, "competition": None, "comp_form_ppg": None,
+                         "position": None, "league_size": None, "table_ppg": None,
+                         "context_league": None},
+                "away": {"form_ppg": None, "competition": None, "comp_form_ppg": None,
+                         "position": None, "league_size": None, "table_ppg": None,
+                         "context_league": None},
+            },
             "score_matrix": np.zeros((7, 7)),
             "last_trained": self.last_trained,
         }
@@ -308,6 +477,8 @@ class PredictionEngine:
             "away_defense": self.away_defense,
             "elo": self.elo,
             "form_ppg": self.form_ppg,
+            "comp_form_ppg": self.comp_form_ppg,
+            "name_index": self.name_index,
             "teams": sorted(self.teams),
         }
 
@@ -326,5 +497,7 @@ class PredictionEngine:
         engine.away_defense = data.get("away_defense", {})
         engine.elo = data.get("elo", {})
         engine.form_ppg = data.get("form_ppg", {})
+        engine.comp_form_ppg = data.get("comp_form_ppg", {})
+        engine.name_index = data.get("name_index", {})
         engine.teams = set(data.get("teams", []))
         return engine
