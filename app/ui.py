@@ -312,6 +312,7 @@ def show_error_message(message: str):
 
 
 def probability_bar(label: str, probability: float, color: str, max_width: int = 100):
+    probability = max(0.0, min(1.0, float(probability or 0)))
     pct = probability * 100
     width = max(5, min(pct, max_width))
     st.markdown(

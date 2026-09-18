@@ -108,7 +108,9 @@ def _change_league():
         st.session_state.last_league = new_code
         st.query_params["league"] = new_code
         _save_preferences()
-        st.rerun()
+        # Predictions are league-specific; stale ones cause display errors.
+        st.session_state.pop("last_prediction", None)
+        st.session_state.pop("fixture_predictions", None)
 
 
 def _change_favourite():

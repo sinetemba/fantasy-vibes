@@ -31,6 +31,8 @@ def render(service: LeagueService):
     - **Football-Data.org** — real current-season matches and tables (free API key required).
     - **TheSportsDB** — tables and fixtures (free key; demo key `3` included for testing).
     - **Openfootball** — public-domain match schedules and results, no API key needed.
+    - **FixtureDownload.com** — CSV/JSON fixtures and results for many leagues.
+    - **PSL Match Centre** — South African PSL fixtures and results via the official match centre.
 
     ### ⚙️ Getting Started
     ```powershell

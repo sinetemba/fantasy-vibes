@@ -2,7 +2,7 @@
 
 import logging
 import os
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 from ..utils import cached_get, to_sast
@@ -119,6 +119,83 @@ class TheSportsDBSource(DataSource):
                 }
             )
         matches.sort(key=lambda x: x["date"] or "")
+        return matches
+
+    def get_matches_by_date(
+        self, target_date: Optional[date] = None
+    ) -> List[Dict[str, Any]]:
+        """Return all soccer matches for a specific date via TheSportsDB eventsday."""
+        target = target_date or date.today()
+        date_str = target.strftime("%Y-%m-%d")
+        url = f"{self._base_url()}/eventsday.php?d={date_str}&s=Soccer"
+        data = cached_get(url, ttl_seconds=1800)
+        if not data:
+            return []
+
+        events = data.get("events") or []
+        matches = []
+        for e in events:
+            status = STATUS_MAP.get(e.get("strStatus"), "scheduled")
+            home = _normalize_team(e.get("strHomeTeam", ""))
+            away = _normalize_team(e.get("strAwayTeam", ""))
+            if not home or not away:
+                continue
+
+            home_score = e.get("intHomeScore")
+            away_score = e.get("intAwayScore")
+            if status == "full_time":
+                try:
+                    home_score = int(home_score) if home_score is not None else 0
+                    away_score = int(away_score) if away_score is not None else 0
+                except (ValueError, TypeError):
+                    home_score = 0
+                    away_score = 0
+            else:
+                home_score = None
+                away_score = None
+
+            ts = e.get("strTimestamp")
+            dt = None
+            if ts:
+                try:
+                    dt = to_sast(datetime.fromisoformat(ts.replace("Z", "+00:00")), "UTC")
+                except ValueError:
+                    pass
+
+            if status == "full_time":
+                minutes = "FT"
+            elif status == "scheduled" and dt is not None:
+                minutes = dt.strftime("%H:%M") + " SAST"
+            else:
+                minutes = status.replace("_", " ").title()
+
+            league_name = e.get("strLeague", "")
+            league_id = e.get("idLeague") or ""
+            league_code = (
+                str(league_id)
+                if league_id
+                else league_name.lower().replace(" ", "_").replace("-", "_")[:20]
+            )
+
+            matches.append(
+                {
+                    "match_id": str(e.get("idEvent", f"{home}_{away}")),
+                    "home_team": home,
+                    "away_team": away,
+                    "home_score": home_score,
+                    "away_score": away_score,
+                    "date": dt.isoformat() if dt else None,
+                    "round": f"Matchday {e.get('intRound', '')}" if e.get("intRound") else "",
+                    "status": status,
+                    "minutes_elapsed": minutes,
+                    "venue": e.get("strVenue") or None,
+                    "source": self.name,
+                    "league_name": league_name,
+                    "league_code": league_code,
+                }
+            )
+
+        matches.sort(key=lambda x: (x.get("league_name", ""), x["date"] or ""))
         return matches
 
     def get_standings(

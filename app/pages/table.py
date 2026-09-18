@@ -21,7 +21,7 @@ def render(service: LeagueService):
     st.markdown("## 📊 League Table")
     standings = service.get_standings()
     if not standings:
-        show_info_message("No standings available. Try another data source or season.")
+        show_info_message("No standings available for this league. Try another league from the sidebar.")
         return
 
     df = pd.DataFrame(standings)

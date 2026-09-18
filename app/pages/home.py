@@ -151,8 +151,9 @@ def render(service: LeagueService):
             pred = st.session_state["last_prediction"]
             outcome = pred.get("outcome_probabilities", {})
             c1, c2, c3 = st.columns(3)
+            score = pred.get("predicted_score", {})
             c1.metric(f"🏠 {home}", f"{outcome.get('home_win', 0)*100:.1f}%")
-            c2.metric("🤝 Draw", f"{outcome.get('draw', 0)*100:.1f}%", pred["predicted_score"]["score"])
+            c2.metric("🤝 Draw", f"{outcome.get('draw', 0)*100:.1f}%", score.get("score", "—"))
             c3.metric(f"✈️ {away}", f"{outcome.get('away_win', 0)*100:.1f}%")
 
     # Featured next fixture

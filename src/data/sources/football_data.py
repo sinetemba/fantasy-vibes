@@ -70,12 +70,18 @@ class FootballDataSource(DataSource):
         season: Optional[str] = None,
         status_filter: Optional[str] = None,
         ttl_seconds: int = 300,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         cfg = league_config.get("football_data", {})
         code = cfg.get("code", "PL")
         season_param = season or cfg.get("season", "")
         params: Dict[str, str] = {}
-        if season_param:
+        if date_from:
+            params["dateFrom"] = date_from
+        if date_to:
+            params["dateTo"] = date_to
+        if season_param and not (date_from or date_to):
             params["season"] = season_param
         if status_filter:
             params["status"] = status_filter

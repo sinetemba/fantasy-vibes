@@ -19,8 +19,8 @@ from src.data import LeagueService
 
 
 def _refresh(service: LeagueService):
-    # Re-instantiate to clear in-memory cache and re-fetch from disk/HTTP
-    service._refresh()
+    """Public refresh helper for the current league."""
+    service.refresh()
 
 
 def render(service: LeagueService):
