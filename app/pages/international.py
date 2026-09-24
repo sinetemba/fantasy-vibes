@@ -243,6 +243,8 @@ def _render_match(m: Dict[str, Any]):
             time = dt.strftime("%H:%M") + " SAST" if dt else "—"
         except Exception:
             time = "—"
+        if m.get("time_confirmed") is False:
+            time = "TBC"
         st.markdown(
             f"""**{time}**  
 <span style='color:#a0a0a0; font-size:0.8rem;'>{m.get('competition_name', '')}</span>""",

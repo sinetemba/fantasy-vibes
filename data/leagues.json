@@ -15,6 +15,7 @@
       "league_id": "4328",
       "season": "2026-2027"
     },
+    "zones": { "qualification": 4, "relegation": 3 },
     "default": true
   },
   "BL1": {
@@ -32,7 +33,8 @@
     "thesportsdb": {
       "league_id": "4331",
       "season": "2026-2027"
-    }
+    },
+    "zones": { "qualification": 4, "relegation": 2 }
   },
   "SA": {
     "name": "Serie A",
@@ -49,7 +51,8 @@
     "thesportsdb": {
       "league_id": "4332",
       "season": "2026-2027"
-    }
+    },
+    "zones": { "qualification": 4, "relegation": 3 }
   },
   "PD": {
     "name": "La Liga",
@@ -66,7 +69,8 @@
     "thesportsdb": {
       "league_id": "4335",
       "season": "2026-2027"
-    }
+    },
+    "zones": { "qualification": 4, "relegation": 3 }
   },
   "FL1": {
     "name": "Ligue 1",
@@ -83,7 +87,8 @@
     "thesportsdb": {
       "league_id": "4334",
       "season": "2026-2027"
-    }
+    },
+    "zones": { "qualification": 3, "relegation": 2 }
   },
   "PSL": {
     "name": "South African PSL",
@@ -92,7 +97,8 @@
     "thesportsdb": {
       "league_id": "4802",
       "season": "2026-2027"
-    }
+    },
+    "zones": { "qualification": 2, "relegation": 1 }
   },
   "CL": {
     "name": "UEFA Champions League",
@@ -110,7 +116,8 @@
     "thesportsdb": {
       "league_id": "4480",
       "season": "2026-2027"
-    }
+    },
+    "zones": { "qualification": 8 }
   },
   "EL": {
     "name": "UEFA Europa League",
@@ -124,7 +131,8 @@
     "thesportsdb": {
       "league_id": "4481",
       "season": "2026-2027"
-    }
+    },
+    "zones": { "qualification": 8 }
   },
   "MLS": {
     "name": "Major League Soccer",

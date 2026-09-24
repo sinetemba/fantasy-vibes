@@ -210,11 +210,11 @@ class PredictionEngine:
     def _fit_elo(self, df: pd.DataFrame, k: float = 30.0, home_field: float = 70.0):
         priors = getattr(self, "_initial_elo", {})
         self.elo = {t: float(priors.get(t, 1500.0)) for t in self.teams}
-        for _, row in df.sort_values("date").iterrows():
-            home = row["home_team"]
-            away = row["away_team"]
-            hs, aws = row["home_score"], row["away_score"]
-            weight = row.get("weight", 1.0)
+        for row in df.sort_values("date").itertuples():
+            home = row.home_team
+            away = row.away_team
+            hs, aws = row.home_score, row.away_score
+            weight = getattr(row, "weight", 1.0)
 
             expected = _expected_score(self.elo[home] + home_field, self.elo[away])
             if hs > aws:
@@ -235,17 +235,17 @@ class PredictionEngine:
     def _fit_form(self, df: pd.DataFrame, n: int = 10, comp_n: int = 6):
         form: Dict[str, List[Dict[str, Any]]] = {t: [] for t in self.teams}
         comp_form: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
-        for _, row in df.sort_values("date").iterrows():
-            home, away = row["home_team"], row["away_team"]
-            comp = row.get("competition") or "default"
-            hs, aws = row["home_score"], row["away_score"]
+        for row in df.sort_values("date").itertuples():
+            home, away = row.home_team, row.away_team
+            comp = getattr(row, "competition", None) or "default"
+            hs, aws = row.home_score, row.away_score
             if hs > aws:
                 home_pts, away_pts = 3, 0
             elif hs == aws:
                 home_pts, away_pts = 1, 1
             else:
                 home_pts, away_pts = 0, 3
-            weight = row.get("weight", 1.0)
+            weight = getattr(row, "weight", 1.0)
             form[home].append({"pts": home_pts, "weight": weight})
             form[away].append({"pts": away_pts, "weight": weight})
             comp_form.setdefault((comp, home), []).append({"pts": home_pts, "weight": weight})

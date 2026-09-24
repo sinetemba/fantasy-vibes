@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-from ..utils import TTL_HISTORICAL, cached_get, sast_now, to_sast
+from ..utils import TTL_HISTORICAL, cached_get, compute_table, sast_now, to_sast
 from .base import DataSource
 
 logger = logging.getLogger(__name__)
@@ -140,59 +140,4 @@ class OpenfootballSource(DataSource):
     def get_standings(
         self, league_config: Dict[str, Any], season: Optional[str] = None
     ) -> List[Dict[str, Any]]:
-        matches = self.get_matches(league_config, season)
-        table = {}
-
-        for m in matches:
-            if m["status"] != STATUS_FULL_TIME:
-                continue
-            home = m["home_team"]
-            away = m["away_team"]
-            hg = m["home_score"]
-            ag = m["away_score"]
-            if hg is None or ag is None:
-                continue
-
-            for team, gf, ga, is_home in [(home, hg, ag, True), (away, ag, hg, False)]:
-                if team not in table:
-                    table[team] = {
-                        "team": team,
-                        "played": 0,
-                        "won": 0,
-                        "drawn": 0,
-                        "lost": 0,
-                        "goals_for": 0,
-                        "goals_against": 0,
-                        "goal_difference": 0,
-                        "points": 0,
-                        "form": [],
-                    }
-                rec = table[team]
-                rec["played"] += 1
-                rec["goals_for"] += gf
-                rec["goals_against"] += ga
-
-                if gf > ga:
-                    rec["won"] += 1
-                    rec["points"] += 3
-                    rec["form"].append("W")
-                elif gf == ag:
-                    rec["drawn"] += 1
-                    rec["points"] += 1
-                    rec["form"].append("D")
-                else:
-                    rec["lost"] += 1
-                    rec["form"].append("L")
-
-        for rec in table.values():
-            rec["goal_difference"] = rec["goals_for"] - rec["goals_against"]
-            rec["form"] = "".join(rec["form"][-5:][::-1])
-
-        sorted_table = sorted(
-            table.values(),
-            key=lambda x: (x["points"], x["goal_difference"], x["goals_for"]),
-            reverse=True,
-        )
-        for i, rec in enumerate(sorted_table, 1):
-            rec["position"] = i
-        return sorted_table
+        return compute_table(self.get_matches(league_config, season))

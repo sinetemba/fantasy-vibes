@@ -13,6 +13,7 @@ from app.ui import (
     show_info_message,
 )
 from src.data import LeagueService
+from src.data.utils import is_upcoming
 
 
 def _render_favourite_team(service: LeagueService, team: str):
@@ -41,7 +42,7 @@ def _render_favourite_team(service: LeagueService, team: str):
     upcoming = [
         m
         for m in service.get_matches()
-        if m.get("status") == "scheduled" and (m["home_team"] == team or m["away_team"] == team)
+        if is_upcoming(m) and (m["home_team"] == team or m["away_team"] == team)
     ]
     if upcoming:
         upcoming.sort(key=lambda m: m.get("date") or "z")
@@ -158,7 +159,7 @@ def render(service: LeagueService):
 
     # Featured next fixture
     st.markdown("---")
-    upcoming = [m for m in matches if m.get("status") == "scheduled"]
+    upcoming = [m for m in matches if is_upcoming(m)]
     if upcoming:
         st.markdown("### 📅 Next Fixture")
         next_match = upcoming[0]

@@ -454,7 +454,15 @@ def create_scoreline_chart(prob_matrix: np.ndarray, max_goals: int = 5) -> go.Fi
     return fig
 
 
-def create_standings_table(rows: List[Dict]) -> str:
+def create_standings_table(rows: List[Dict], zones: Optional[Dict[str, int]] = None) -> str:
+    # Zones are per-league counts of top/bottom positions to highlight
+    # (e.g. {"qualification": 4, "relegation": 3}). Leagues without a
+    # defined zone scheme — or with none, like MLS — render uncoloured.
+    size = len(rows)
+    zones = zones or {}
+    qual_cutoff = int(zones.get("qualification") or 0)
+    rel_count = int(zones.get("relegation") or 0)
+    rel_cutoff = size - rel_count + 1 if rel_count else None
     body = ""
     for row in rows:
         cls = ""
@@ -462,9 +470,9 @@ def create_standings_table(rows: List[Dict]) -> str:
             pos = int(row.get("position", 99))
         except (ValueError, TypeError):
             pos = 99
-        if pos <= 4:
+        if qual_cutoff and pos <= qual_cutoff:
             cls = "qualified"
-        elif pos >= 18:
+        elif rel_cutoff and pos >= rel_cutoff:
             cls = "relegation"
         try:
             gd = int(row.get("goal_difference", 0) or 0)
@@ -551,7 +559,7 @@ def match_card_html(
                 <div style="flex:1; text-align:right; font-weight:700; font-size:1.1rem;">{safe_html(home_team)}</div>
                 <div style="min-width:80px; text-align:center;">
                     <div style="font-size:1.8rem; font-weight:800; color:#00ff85;">{score}</div>
-                    <div style="font-size:0.75rem; color:#a0a0a0;">{safe_html(time)} SAST</div>
+                    <div style="font-size:0.75rem; color:#a0a0a0;">{safe_html(time)}{" SAST" if ":" in str(time) else ""}</div>
                 </div>
                 <div style="flex:1; text-align:left; font-weight:700; font-size:1.1rem;">{safe_html(away_team)}</div>
             </div>

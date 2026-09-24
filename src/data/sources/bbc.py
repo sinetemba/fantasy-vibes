@@ -8,6 +8,7 @@ deep history.
 
 import calendar
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -32,6 +33,71 @@ STATUS_MAP = {
 # other windows must be inside a single calendar month.
 DEFAULT_DAYS_BACK = 6
 DEFAULT_DAYS_AHEAD = 150
+
+
+def _event_day(e: Dict[str, Any]) -> Optional[date]:
+    try:
+        return datetime.fromisoformat(
+            (e.get("startDateTime") or "").replace("Z", "+00:00")
+        ).date()
+    except ValueError:
+        return None
+
+
+def _dedupe_events(
+    events: List[Tuple[Dict[str, Any], str]],
+) -> List[Tuple[Dict[str, Any], str]]:
+    """Collapse duplicate feed entries for the same fixture.
+
+    The feed sometimes emits a fixture more than once — e.g. a date-only
+    "kick-off time to be confirmed" placeholder next to the real timed
+    event, occasionally with a date a day or two off. Treat same-pairing
+    events as duplicates when they share a round (a pairing meets once
+    per round) or land within a day of each other, and keep the entry
+    with the more certain kickoff time.
+    """
+
+    def pairing(e: Dict[str, Any]) -> Tuple[Any, Any, Any]:
+        home = e.get("home") or {}
+        away = e.get("away") or {}
+        return (
+            (e.get("tournament") or {}).get("id") or e.get("tournamentId"),
+            home.get("id") or home.get("fullName"),
+            away.get("id") or away.get("fullName"),
+        )
+
+    def round_id(e: Dict[str, Any]) -> Any:
+        r = e.get("round") or {}
+        return r.get("id") or r.get("name")
+
+    def timed(e: Dict[str, Any]) -> bool:
+        return bool((e.get("time") or {}).get("timeCertainty")) or "T" in (
+            e.get("startDateTime") or ""
+        )
+
+    def is_dupe(e: Dict[str, Any], k: Dict[str, Any]) -> bool:
+        if pairing(k) != pairing(e):
+            return False
+        day, kday = _event_day(e), _event_day(k)
+        if day is None or kday is None or abs((day - kday).days) <= 1:
+            return True
+        # Same pairing in the same round is also a dupe when at least one
+        # entry is an unconfirmed-time placeholder — two timed entries in
+        # one round may be genuinely distinct fixtures.
+        er, kr = round_id(e), round_id(k)
+        return er is not None and er == kr and not (timed(e) and timed(k))
+
+    kept: List[Tuple[Dict[str, Any], str]] = []
+    for e, label in events:
+        for i, (k, _) in enumerate(kept):
+            if not is_dupe(e, k):
+                continue
+            if timed(e) and not timed(k):
+                kept[i] = (e, label)
+            break
+        else:
+            kept.append((e, label))
+    return kept
 
 
 def _date_windows(back: int, ahead: int) -> List[Tuple[str, str]]:
@@ -90,17 +156,25 @@ class BBCSource(DataSource):
         back = int(cfg.get("days_back", DEFAULT_DAYS_BACK))
         ahead = int(cfg.get("days_ahead", DEFAULT_DAYS_AHEAD))
 
-        matches: List[Dict[str, Any]] = []
-        for start, end in _date_windows(back, ahead):
-            for group in self._fetch(start, end):
+        windows = _date_windows(back, ahead)
+        with ThreadPoolExecutor(max_workers=min(6, len(windows) or 1)) as pool:
+            window_groups = list(pool.map(lambda w: self._fetch(*w), windows))
+
+        events: List[Tuple[Dict[str, Any], str]] = []
+        for groups in window_groups:
+            for group in groups:
                 for sub in group.get("secondaryGroups") or []:
                     round_label = sub.get("displayLabel") or ""
                     for e in sub.get("events") or []:
                         if (e.get("tournament") or {}).get("name") not in tournaments:
                             continue
-                        m = self._to_match(e, round_label)
-                        if m:
-                            matches.append(m)
+                        events.append((e, round_label))
+
+        matches = []
+        for e, round_label in _dedupe_events(events):
+            m = self._to_match(e, round_label)
+            if m:
+                matches.append(m)
 
         matches.sort(key=lambda x: x["date"] or "")
         return matches
@@ -136,10 +210,19 @@ class BBCSource(DataSource):
             except ValueError:
                 pass
 
+        # Date-only feed entries have no confirmed kickoff — their datetime
+        # is just midnight UTC, so rendering it as "02:00 SAST" is a lie.
+        time_field = e.get("time") or {}
+        if "timeCertainty" in time_field:
+            time_certain = bool(time_field["timeCertainty"])
+        else:
+            time_certain = "T" in (e.get("startDateTime") or "")
         if period:
             minutes = period
-        elif status == "scheduled" and dt is not None:
+        elif status == "scheduled" and dt is not None and time_certain:
             minutes = dt.strftime("%H:%M") + " SAST"
+        elif status == "scheduled" and not time_certain:
+            minutes = "TBC"
         else:
             minutes = status.replace("_", " ").title()
 
@@ -153,6 +236,7 @@ class BBCSource(DataSource):
             "round": round_label,
             "status": status,
             "minutes_elapsed": minutes,
+            "time_confirmed": time_certain,
             "venue": None,
             "source": self.name,
         }

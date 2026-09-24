@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from ..utils import CACHE_DIR, to_sast
+from ..utils import CACHE_DIR, compute_table, to_sast
 from .base import DataSource
 
 logger = logging.getLogger(__name__)
@@ -217,76 +217,4 @@ class PSLScraperSource(DataSource):
     def get_standings(
         self, league_config: Dict[str, Any], season: Optional[str] = None
     ) -> List[Dict[str, Any]]:
-        matches = self.get_matches(league_config, season)
-        table: Dict[str, Dict[str, Any]] = {}
-        all_teams = set()
-
-        for m in matches:
-            home = m.get("home_team")
-            away = m.get("away_team")
-            if not home or not away:
-                continue
-            all_teams.add(home)
-            all_teams.add(away)
-
-            if m.get("status") != "full_time" or m.get("home_score") is None:
-                continue
-
-            for team, gf, ga in [(home, m["home_score"], m["away_score"]), (away, m["away_score"], m["home_score"])]:
-                if team not in table:
-                    table[team] = {
-                        "team": team,
-                        "played": 0,
-                        "won": 0,
-                        "drawn": 0,
-                        "lost": 0,
-                        "goals_for": 0,
-                        "goals_against": 0,
-                        "goal_difference": 0,
-                        "points": 0,
-                        "form": [],
-                    }
-                rec = table[team]
-                rec["played"] += 1
-                rec["goals_for"] += gf
-                rec["goals_against"] += ga
-                if gf > ga:
-                    rec["won"] += 1
-                    rec["points"] += 3
-                    rec["form"].append("W")
-                elif gf == ga:
-                    rec["drawn"] += 1
-                    rec["points"] += 1
-                    rec["form"].append("D")
-                else:
-                    rec["lost"] += 1
-                    rec["form"].append("L")
-
-        # Include every team, even those with no recorded result yet.
-        for team in all_teams:
-            if team not in table:
-                table[team] = {
-                    "team": team,
-                    "played": 0,
-                    "won": 0,
-                    "drawn": 0,
-                    "lost": 0,
-                    "goals_for": 0,
-                    "goals_against": 0,
-                    "goal_difference": 0,
-                    "points": 0,
-                    "form": [],
-                }
-
-        for rec in table.values():
-            rec["goal_difference"] = rec["goals_for"] - rec["goals_against"]
-            rec["form"] = "".join(rec["form"][-5:])
-
-        sorted_table = sorted(
-            table.values(),
-            key=lambda x: (x["points"], x["goal_difference"], x["goals_for"]),
-            reverse=True,
-        )
-        for i, rec in enumerate(sorted_table, 1):
-            rec["position"] = i
-        return sorted_table
+        return compute_table(self.get_matches(league_config, season))

@@ -30,7 +30,11 @@ def render(service: LeagueService):
     ]
 
     table_height = max(180, 80 + len(standings) * 50)
-    components.html(create_standings_table(standings), height=table_height, scrolling=False)
+    components.html(
+        create_standings_table(standings, zones=service.get_zones()),
+        height=table_height,
+        scrolling=False,
+    )
 
     st.markdown("---")
     with st.expander("📋 Raw table data"):

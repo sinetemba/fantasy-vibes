@@ -79,7 +79,8 @@ def _render_filters(matches: List[Dict[str, Any]], service: LeagueService):
             st.session_state["fixtures_round"] = "All rounds"
         st.selectbox("🏟️ Round", options, key="fixtures_round")
     with c2:
-        if dates:
+        st.checkbox("📅 Filter by date", value=False, key="fixtures_use_date")
+        if dates and st.session_state.get("fixtures_use_date"):
             today = date.today()
             default_date = today
             min_value = min(today, dates[0])
@@ -93,11 +94,12 @@ def _render_filters(matches: List[Dict[str, Any]], service: LeagueService):
                 except Exception:
                     st.session_state["fixtures_date"] = default_date
             st.date_input(
-                "📅 Date",
+                "Date",
                 value=default_date,
                 min_value=min_value,
                 max_value=max_value,
                 key="fixtures_date",
+                label_visibility="collapsed",
             )
     with c3:
         st.checkbox("🗓️ This week's fixtures", value=False, key="fixtures_this_week")
@@ -130,7 +132,8 @@ def _render_filters(matches: List[Dict[str, Any]], service: LeagueService):
 
 def _apply_filters(matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     round_filter = st.session_state.get("fixtures_round", "All rounds")
-    date_filter = st.session_state.get("fixtures_date", None)
+    use_date = st.session_state.get("fixtures_use_date", False)
+    date_filter = st.session_state.get("fixtures_date") if use_date else None
     show_completed = st.session_state.get("fixtures_show_completed", False)
     show_all_upcoming = st.session_state.get("fixtures_show_all_upcoming", False)
     this_week = st.session_state.get("fixtures_this_week", False)
@@ -190,6 +193,8 @@ def _render_fixture(service: LeagueService, m: Dict[str, Any]):
             time = dt.strftime("%H:%M") + " SAST" if dt else "—"
         except Exception:
             time = "—"
+        if m.get("time_confirmed") is False:
+            time = "TBC"
         st.markdown(
             f"""**{time}**  
 <span style='color:#a0a0a0; font-size:0.8rem;'>{m.get('round', '')}</span>""",

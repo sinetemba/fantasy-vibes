@@ -1,10 +1,8 @@
 """Live matches page showing live, recent and upcoming fixtures."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import streamlit as st
-
-import streamlit.components.v1 as components
 
 from app.ui import (
     apply_theme,
@@ -16,6 +14,7 @@ from app.ui import (
     show_warning_message,
 )
 from src.data import LeagueService
+from src.data.utils import is_upcoming
 
 
 def _refresh(service: LeagueService):
@@ -39,14 +38,27 @@ def render(service: LeagueService):
     with c3:
         auto_refresh = st.checkbox("Auto-refresh", value=False, key="live_auto_refresh")
 
+    interval = None
     if auto_refresh:
         interval = st.slider("Refresh interval (s)", 30, 300, 60, key="live_refresh_interval")
-        components.html(
-            f"<script>setTimeout(function(){{window.location.reload();}}, {interval*1000});</script>",
-            height=0,
-            width=0,
-        )
 
+    # Auto-refresh reruns just this fragment rather than reloading the whole
+    # page — same freshness, much lighter.
+    if hasattr(st, "fragment"):
+        run_every = timedelta(seconds=interval) if interval else None
+
+        @st.fragment(run_every=run_every)
+        def _live_body():
+            _render_match_lists(service)
+
+        _live_body()
+    else:
+        _render_match_lists(service)
+
+    display_disclaimer()
+
+
+def _render_match_lists(service: LeagueService):
     matches = service.get_matches()
     if not matches:
         show_warning_message("No match data available for this league.")
@@ -54,7 +66,7 @@ def render(service: LeagueService):
 
     live = service.get_live_matches()
     full_time = [m for m in matches if m.get("status") == "full_time"]
-    scheduled = [m for m in matches if m.get("status") == "scheduled"]
+    scheduled = [m for m in matches if is_upcoming(m)]
 
     if live:
         st.markdown("### 🔴 Live Now")
@@ -92,7 +104,6 @@ def render(service: LeagueService):
         show_info_message("No matches found in any status filter.")
 
     st.markdown("---")
-    display_disclaimer()
 
 
 def _render_match(m):
@@ -103,6 +114,8 @@ def _render_match(m):
             time = dt.strftime("%H:%M")
         except Exception:
             pass
+    if m.get("time_confirmed") is False:
+        time = "TBC"
     st.markdown(
         match_card_html(
             m["home_team"],

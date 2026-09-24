@@ -2,6 +2,7 @@
 
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from itertools import groupby
 from pathlib import Path
@@ -19,6 +20,7 @@ from app.ui import (
     probability_bar,
 )
 from src.data import LeagueService
+from src.data.prediction_engine import _norm_key
 from src.data.sources.football_data import FootballDataSource
 from src.data.sources.thesportsdb import TheSportsDBSource
 
@@ -81,9 +83,12 @@ def _load_todays_fixtures(today: str) -> List[Dict[str, Any]]:
     try:
         fd_source = FootballDataSource()
         leagues = _load_leagues()
-        for code, cfg in leagues.items():
-            if "football_data" not in cfg:
-                continue
+        entries = [
+            (code, cfg) for code, cfg in leagues.items() if "football_data" in cfg
+        ]
+
+        def _fd_rows(item):
+            code, cfg = item
             try:
                 fd_matches = fd_source.get_matches(
                     cfg,
@@ -91,22 +96,36 @@ def _load_todays_fixtures(today: str) -> List[Dict[str, Any]]:
                     date_to=today,
                     ttl_seconds=1800,
                 )
-                for m in fd_matches:
-                    row = dict(m)
-                    row["league_code"] = code
-                    row["league_name"] = cfg["name"]
-                    fixtures.append(row)
             except Exception as exc:
                 logger.warning(f"Football-Data fixtures for {code} failed: {exc}")
+                return []
+            rows = []
+            for m in fd_matches:
+                row = dict(m)
+                row["league_code"] = code
+                row["league_name"] = cfg["name"]
+                rows.append(row)
+            return rows
+
+        with ThreadPoolExecutor(max_workers=min(6, len(entries) or 1)) as pool:
+            for rows in pool.map(_fd_rows, entries):
+                fixtures.extend(rows)
     except Exception as exc:
         logger.warning(f"Football-Data fixtures failed: {exc}")
 
     if fixtures:
-        # Dedupe by a stable key (best-effort across sources).
+        # Dedupe by a stable key (best-effort across sources). Sources can
+        # disagree on kickoff time by minutes and on team-name decoration
+        # ("Manchester United FC" vs "Manchester United"), so normalise
+        # names and compare on the date part only.
         seen: set = set()
         unique: List[Dict[str, Any]] = []
         for m in fixtures:
-            key = (m.get("home_team", "").lower(), m.get("away_team", "").lower(), m.get("date"))
+            key = (
+                _norm_key(m.get("home_team", "")),
+                _norm_key(m.get("away_team", "")),
+                (m.get("date") or "")[:10],
+            )
             if key not in seen:
                 seen.add(key)
                 unique.append(m)

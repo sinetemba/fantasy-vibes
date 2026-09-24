@@ -4,11 +4,12 @@ import hashlib
 import json
 import logging
 import os
+import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -33,6 +34,9 @@ DEFAULT_TIMEOUT = 20
 TTL_LIVE = 300                # in-play / same-day data
 TTL_CURRENT = 1800            # current-season fixtures & standings
 TTL_HISTORICAL = 7 * 86400    # completed seasons & static archives
+# Expired files double as a stale-data fallback on fetch failure, so only
+# prune them once they're well past usefulness.
+CACHE_MAX_AGE = 30 * 86400
 
 # One session per worker thread so keep-alive is reused without sharing a
 # Session across threads.
@@ -59,7 +63,41 @@ _CACHE_LOCKS_GUARD = threading.Lock()
 
 def _cache_lock(key: str) -> threading.Lock:
     with _CACHE_LOCKS_GUARD:
+        # Bound the map — a held lock object stays valid for its holder even
+        # if the entry is dropped, so clearing just loses dedup for new calls.
+        if len(_CACHE_LOCKS) > 10_000:
+            _CACHE_LOCKS.clear()
         return _CACHE_LOCKS.setdefault(key, threading.Lock())
+
+
+# Only genuine cache artifacts are prunable — never user state like
+# preferences.json or persisted model files.
+_PRUNABLE = re.compile(r"^[0-9a-f]{64}\.(json|txt)$")
+
+
+def prune_cache(max_age_seconds: int = CACHE_MAX_AGE) -> int:
+    """Delete stale cache files (hashed URL entries, leftover .tmp files and
+    the scraped PSL page) older than max_age. Returns number removed."""
+    removed = 0
+    cutoff = time.time() - max_age_seconds
+    for f in CACHE_DIR.glob("*"):
+        try:
+            prunable = (
+                _PRUNABLE.match(f.name)
+                or f.suffix == ".tmp"
+                or f.name == "psl_matchcentre.html"
+            )
+            if prunable and f.is_file() and f.stat().st_mtime < cutoff:
+                f.unlink()
+                removed += 1
+        except Exception:
+            pass
+    if removed:
+        logger.info(f"Pruned {removed} stale cache files")
+    return removed
+
+
+prune_cache()
 
 
 def _is_cache_valid(cache_path: Path, ttl_seconds: int) -> bool:
@@ -177,6 +215,90 @@ def to_sast(dt: Optional[datetime], source_tz_name: str = "UTC") -> Optional[dat
     except Exception:
         # If IANA data is unavailable, add a fixed +2 hour offset as a fallback.
         return dt.replace(tzinfo=None) + timedelta(hours=2) if dt.tzinfo is None else dt.astimezone(_SAST).replace(tzinfo=None)
+
+
+def compute_table(matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Compute a standings table from a match list. Every team appears,
+    even with no recorded result; form is last-5, oldest first (the UI
+    expects rightmost = latest)."""
+    table: Dict[str, Dict[str, Any]] = {}
+    all_teams = set()
+
+    for m in matches:
+        home = m.get("home_team")
+        away = m.get("away_team")
+        if not home or not away:
+            continue
+        all_teams.add(home)
+        all_teams.add(away)
+
+        if m.get("status") != "full_time" or m.get("home_score") is None:
+            continue
+
+        for team, gf, ga in [
+            (home, m["home_score"], m["away_score"]),
+            (away, m["away_score"], m["home_score"]),
+        ]:
+            if team not in table:
+                table[team] = _empty_row(team)
+            rec = table[team]
+            rec["played"] += 1
+            rec["goals_for"] += gf
+            rec["goals_against"] += ga
+            if gf > ga:
+                rec["won"] += 1
+                rec["points"] += 3
+                rec["form"].append("W")
+            elif gf == ga:
+                rec["drawn"] += 1
+                rec["points"] += 1
+                rec["form"].append("D")
+            else:
+                rec["lost"] += 1
+                rec["form"].append("L")
+
+    for team in all_teams:
+        if team not in table:
+            table[team] = _empty_row(team)
+
+    for rec in table.values():
+        rec["goal_difference"] = rec["goals_for"] - rec["goals_against"]
+        rec["form"] = "".join(rec["form"][-5:])
+
+    sorted_table = sorted(
+        table.values(),
+        key=lambda x: (x["points"], x["goal_difference"], x["goals_for"]),
+        reverse=True,
+    )
+    for i, rec in enumerate(sorted_table, 1):
+        rec["position"] = i
+    return sorted_table
+
+
+def _empty_row(team: str) -> Dict[str, Any]:
+    return {
+        "team": team,
+        "played": 0,
+        "won": 0,
+        "drawn": 0,
+        "lost": 0,
+        "goals_for": 0,
+        "goals_against": 0,
+        "goal_difference": 0,
+        "points": 0,
+        "form": [],
+    }
+
+
+def is_upcoming(m: Any) -> bool:
+    """True for scheduled matches dated today or later (SAST). Past-dated
+    'scheduled' rows are stale feed entries with no recorded score."""
+    if m.get("status") != "scheduled":
+        return False
+    try:
+        return datetime.fromisoformat(m["date"]).date() >= sast_now().date()
+    except Exception:
+        return False
 
 
 def sast_now() -> datetime:

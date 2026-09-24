@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Set
 
 from .prediction_engine import PredictionEngine
+from .utils import compute_table
 from .sources.bbc import BBCSource
 from .sources.composite import CompositeDataSource
 from .sources.fixture_download import FixtureDownloadSource
@@ -25,6 +26,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 LEAGUES_PATH = PROJECT_ROOT / "data" / "leagues.json"
 MODEL_CACHE_DIR = PROJECT_ROOT / "data" / "cache"
 MODEL_TTL = 1800  # seconds
+GROUP_CACHE_TTL = 300  # seconds — group pages refetch at most this often
 NATIONAL_RANKINGS_PATH = PROJECT_ROOT / "data" / "national_rankings.json"
 
 # Matches youth/reserve/women's sides in international feeds,
@@ -104,6 +106,8 @@ class LeagueService:
         self._historical_matches: List[Dict[str, Any]] = []
         self._related: Dict[str, Dict[str, Any]] = {}
         self._team_contexts: Dict[str, Dict[str, Any]] = {}
+        self._group_match_cache: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
+        self._form_index: Optional[Dict[str, List[Dict[str, Any]]]] = None
         self.standings: List[Dict[str, Any]] = []
         self._match_source_name = None
         self._standings_source_name = None
@@ -126,53 +130,28 @@ class LeagueService:
         self._refresh()
 
     def _refresh(self):
-        self.matches = self._source.get_matches(self._current_league)
-        self._match_source_name = self._source.last_matches_source
+        self._group_match_cache.clear()
+        self._form_index = None
+
+        # Matches and standings use disjoint provider lists, so they fetch
+        # in parallel. Historical pulls depend on which source won the
+        # match cascade, so they start once matches land and overlap the
+        # standings fetch.
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            matches_fut = pool.submit(self._source.get_matches, self._current_league)
+            standings_fut = pool.submit(self._source.get_standings, self._current_league)
+            self.matches = matches_fut.result()
+            self._match_source_name = self._source.last_matches_source
+            hist_fut = pool.submit(self._fetch_historical)
+            self.standings = standings_fut.result()
+            self._standings_source_name = self._source.last_standings_source
+            self._historical_matches = hist_fut.result()
+
         if self._current_league.get("senior_only"):
             self.matches = _senior_teams_only(self.matches)
-        self.standings = self._source.get_standings(self._current_league)
-        self._standings_source_name = self._source.last_standings_source
         # Fallback to a live table computed from results if no source provides standings.
         if not self.standings and self.matches and not self._current_league.get("no_table"):
             self._standings_source_name = "computed"
-
-        # Pull openfootball history as extra training data when the live source is different
-        self._historical_matches = []
-        if "openfootball" in self._current_league and self._match_source_name != "openfootball":
-            try:
-                self._historical_matches = OpenfootballSource().get_matches(self._current_league)
-            except Exception:
-                self._historical_matches = []
-
-        # Pull football-data historical seasons as extra training data
-        if "football_data" in self._current_league:
-            for hist_season in self._current_league["football_data"].get("historical", []):
-                try:
-                    self._historical_matches.extend(
-                        FootballDataSource().get_matches(self._current_league, season=hist_season)
-                    )
-                except Exception:
-                    pass
-
-        # Pull TheSportsDB historical seasons as extra training data
-        if "thesportsdb" in self._current_league:
-            for hist_season in self._current_league["thesportsdb"].get("historical", []):
-                try:
-                    self._historical_matches.extend(
-                        TheSportsDBSource().get_matches(self._current_league, season=hist_season)
-                    )
-                except Exception:
-                    pass
-
-        # Pull FixtureDownload historical seasons as extra training data
-        if "fixturedownload" in self._current_league:
-            for hist_season in self._current_league["fixturedownload"].get("historical", []):
-                try:
-                    self._historical_matches.extend(
-                        FixtureDownloadSource().get_matches(self._current_league, season=hist_season)
-                    )
-                except Exception:
-                    pass
 
         # Tag every match with its competition so the engine can track
         # per-tournament form (e.g. domestic league vs Champions League).
@@ -188,6 +167,48 @@ class LeagueService:
 
         self._load_or_fit_model()
         self._team_contexts = self._build_team_contexts()
+
+    def _fetch_historical(self) -> List[Dict[str, Any]]:
+        """Pull configured historical/archived seasons as extra training data."""
+        historical: List[Dict[str, Any]] = []
+
+        # Pull openfootball history as extra training data when the live source is different
+        if "openfootball" in self._current_league and self._match_source_name != "openfootball":
+            try:
+                historical = OpenfootballSource().get_matches(self._current_league)
+            except Exception:
+                historical = []
+
+        # Pull football-data historical seasons as extra training data
+        if "football_data" in self._current_league:
+            for hist_season in self._current_league["football_data"].get("historical", []):
+                try:
+                    historical.extend(
+                        FootballDataSource().get_matches(self._current_league, season=hist_season)
+                    )
+                except Exception:
+                    pass
+
+        # Pull TheSportsDB historical seasons as extra training data
+        if "thesportsdb" in self._current_league:
+            for hist_season in self._current_league["thesportsdb"].get("historical", []):
+                try:
+                    historical.extend(
+                        TheSportsDBSource().get_matches(self._current_league, season=hist_season)
+                    )
+                except Exception:
+                    pass
+
+        # Pull FixtureDownload historical seasons as extra training data
+        if "fixturedownload" in self._current_league:
+            for hist_season in self._current_league["fixturedownload"].get("historical", []):
+                try:
+                    historical.extend(
+                        FixtureDownloadSource().get_matches(self._current_league, season=hist_season)
+                    )
+                except Exception:
+                    pass
+        return historical
 
     def _load_related(self) -> Dict[str, Dict[str, Any]]:
         """Fetch matches and standings for leagues listed in `related`."""
@@ -284,6 +305,11 @@ class LeagueService:
     def get_current_name(self) -> str:
         return self._current_league.get("name", self._current_code)
 
+    def get_zones(self) -> Dict[str, int]:
+        """Standings highlight zones for the current league, e.g.
+        {"qualification": 4, "relegation": 3}. Empty when undefined."""
+        return self._current_league.get("zones") or {}
+
     def get_data_sources(self) -> Dict[str, Optional[str]]:
         return {
             "matches": self._match_source_name,
@@ -313,12 +339,26 @@ class LeagueService:
     ) -> List[Dict[str, Any]]:
         """Return matches from every league tagged with the given group,
         each tagged with its competition code and name. `on_progress` is
-        invoked with (code, name) as each league finishes."""
+        invoked with (code, name) as each league finishes.
+
+        Results are memoised for GROUP_CACHE_TTL so page reruns don't
+        re-query every provider. Cached hits still fire `on_progress`
+        for each league so the caller's progress UI completes."""
         entries = [
             (code, cfg)
             for code, cfg in self._leagues.items()
             if cfg.get("group") == group
         ]
+
+        entry = self._group_match_cache.get(group)
+        if entry and (time.time() - entry[0]) < GROUP_CACHE_TTL:
+            if on_progress:
+                for code, cfg in entries:
+                    try:
+                        on_progress(code, cfg.get("name", code))
+                    except Exception:
+                        pass
+            return [dict(m) for m in entry[1]]
 
         def _fetch(item: Tuple[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
             code, cfg = item
@@ -348,8 +388,29 @@ class LeagueService:
                         on_progress(code, cfg.get("name", code))
                     except Exception:
                         pass
+        # Safety net: the same fixture can surface under two competitions
+        # via different feeds (e.g. a qualifiers feed listing a Nations
+        # League game). INTF is the catch-all friendlies bucket, so on a
+        # collision the more specific competition's entry wins.
+        seen: Dict[Tuple[str, str, str], int] = {}
+        unique: List[Dict[str, Any]] = []
+        for m in matches:
+            key = (
+                (m.get("home_team") or "").strip().lower(),
+                (m.get("away_team") or "").strip().lower(),
+                (m.get("date") or "")[:10],
+            )
+            prev = seen.get(key)
+            if prev is None:
+                seen[key] = len(unique)
+                unique.append(m)
+            elif unique[prev].get("competition") == "INTF" and m.get("competition") != "INTF":
+                unique[prev] = m
+        matches = unique
+
         matches.sort(key=lambda x: x["date"] or "")
-        return matches
+        self._group_match_cache[group] = (time.time(), matches)
+        return [dict(m) for m in matches]
 
     def get_live_matches(self) -> List[Dict[str, Any]]:
         """Return currently live matches, with a fast path for Football-Data."""
@@ -365,81 +426,7 @@ class LeagueService:
 
     @staticmethod
     def _compute_table(matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        table: Dict[str, Dict[str, Any]] = {}
-        all_teams = set()
-
-        for m in matches:
-            home = m.get("home_team")
-            away = m.get("away_team")
-            if not home or not away:
-                continue
-            all_teams.add(home)
-            all_teams.add(away)
-
-            if m.get("status") != "full_time" or m.get("home_score") is None:
-                continue
-
-            for team, gf, ga in [
-                (home, m["home_score"], m["away_score"]),
-                (away, m["away_score"], m["home_score"]),
-            ]:
-                if team not in table:
-                    table[team] = {
-                        "team": team,
-                        "played": 0,
-                        "won": 0,
-                        "drawn": 0,
-                        "lost": 0,
-                        "goals_for": 0,
-                        "goals_against": 0,
-                        "goal_difference": 0,
-                        "points": 0,
-                        "form": [],
-                    }
-                rec = table[team]
-                rec["played"] += 1
-                rec["goals_for"] += gf
-                rec["goals_against"] += ga
-                if gf > ga:
-                    rec["won"] += 1
-                    rec["points"] += 3
-                    rec["form"].append("W")
-                elif gf == ga:
-                    rec["drawn"] += 1
-                    rec["points"] += 1
-                    rec["form"].append("D")
-                else:
-                    rec["lost"] += 1
-                    rec["form"].append("L")
-
-        # Include every team, even those with no recorded result yet.
-        for team in all_teams:
-            if team not in table:
-                table[team] = {
-                    "team": team,
-                    "played": 0,
-                    "won": 0,
-                    "drawn": 0,
-                    "lost": 0,
-                    "goals_for": 0,
-                    "goals_against": 0,
-                    "goal_difference": 0,
-                    "points": 0,
-                    "form": [],
-                }
-
-        for rec in table.values():
-            rec["goal_difference"] = rec["goals_for"] - rec["goals_against"]
-            rec["form"] = "".join(rec["form"][-5:])
-
-        sorted_table = sorted(
-            table.values(),
-            key=lambda x: (x["points"], x["goal_difference"], x["goals_for"]),
-            reverse=True,
-        )
-        for i, rec in enumerate(sorted_table, 1):
-            rec["position"] = i
-        return sorted_table
+        return compute_table(matches)
 
     def _compute_table_from_matches(self) -> List[Dict[str, Any]]:
         return self._compute_table(self.matches)
@@ -476,20 +463,31 @@ class LeagueService:
                 return r
         return None
 
+    def _played_index(self) -> Dict[str, List[Dict[str, Any]]]:
+        """team -> its completed matches, oldest first. Built once per
+        refresh so repeated form lookups don't rescan the whole pool."""
+        if self._form_index is None:
+            pool = list(self.matches) + list(self._historical_matches)
+            for data in self._related.values():
+                pool.extend(data["matches"])
+            played = [
+                m
+                for m in pool
+                if m.get("status") == "full_time" and m.get("home_score") is not None
+            ]
+            played.sort(key=lambda m: m.get("date") or "")
+            index: Dict[str, List[Dict[str, Any]]] = {}
+            for m in played:
+                index.setdefault(m.get("home_team") or "", []).append(m)
+                index.setdefault(m.get("away_team") or "", []).append(m)
+            index.pop("", None)
+            self._form_index = index
+        return self._form_index
+
     def get_team_form(self, team: str, n: int = 5) -> List[Dict[str, Any]]:
         """Last-n results for a team, oldest first. Uses current + historical
         + related-competition matches so national teams get real form."""
-        pool = list(self.matches) + list(self._historical_matches)
-        for data in self._related.values():
-            pool.extend(data["matches"])
-        played = [
-            m
-            for m in pool
-            if m.get("status") == "full_time"
-            and m.get("home_score") is not None
-            and team in (m.get("home_team") or "", m.get("away_team") or "")
-        ]
-        played.sort(key=lambda m: m.get("date") or "")
+        played = self._played_index().get(team, [])
         form = []
         for m in played[-n:]:
             if m["home_team"] == team:
@@ -516,26 +514,39 @@ class LeagueService:
         return form
 
     def get_h2h(self, team_a: str, team_b: str) -> Tuple[Dict[str, int], List[Dict[str, Any]]]:
+        """Head-to-head record across current, historical and related-
+        competition matches. Names are resolved to the engine's canonical
+        form so feed variants (e.g. "Arsenal FC" vs "Arsenal") still pair up."""
+        names_a = {team_a, self._engine.resolve_name(team_a)}
+        names_b = {team_b, self._engine.resolve_name(team_b)}
+        index = self._played_index()
         record = {"played": 0, "a_wins": 0, "b_wins": 0, "draws": 0, "a_gf": 0, "a_ga": 0}
         matches = []
-        for m in self.matches:
-            if m["status"] != "full_time" or m["home_score"] is None:
-                continue
-            if {m["home_team"], m["away_team"]} != {team_a, team_b}:
-                continue
-            record["played"] += 1
-            a_is_home = m["home_team"] == team_a
-            a_gf = m["home_score"] if a_is_home else m["away_score"]
-            a_ga = m["away_score"] if a_is_home else m["home_score"]
-            record["a_gf"] += a_gf
-            record["a_ga"] += a_ga
-            if a_gf > a_ga:
-                record["a_wins"] += 1
-            elif a_gf == a_ga:
-                record["draws"] += 1
-            else:
-                record["b_wins"] += 1
-            matches.append(m)
+        seen = set()
+        for name in names_a:
+            for m in index.get(name, []):
+                if id(m) in seen:
+                    continue
+                seen.add(id(m))
+                home, away = m["home_team"], m["away_team"]
+                if not (
+                    (home in names_a and away in names_b)
+                    or (home in names_b and away in names_a)
+                ):
+                    continue
+                record["played"] += 1
+                a_is_home = home in names_a
+                a_gf = m["home_score"] if a_is_home else m["away_score"]
+                a_ga = m["away_score"] if a_is_home else m["home_score"]
+                record["a_gf"] += a_gf
+                record["a_ga"] += a_ga
+                if a_gf > a_ga:
+                    record["a_wins"] += 1
+                elif a_gf == a_ga:
+                    record["draws"] += 1
+                else:
+                    record["b_wins"] += 1
+                matches.append(m)
         return record, matches
 
     def _model_path(self) -> Path:
