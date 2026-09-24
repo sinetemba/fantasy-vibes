@@ -3,6 +3,8 @@
 import hashlib
 import json
 import logging
+import os
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -26,9 +28,38 @@ CACHE_DIR = PROJECT_ROOT / "data" / "cache"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 DEFAULT_TIMEOUT = 20
 
+# Cache lifetimes by data volatility — finished seasons never change,
+# live/same-day data changes by the minute.
+TTL_LIVE = 300                # in-play / same-day data
+TTL_CURRENT = 1800            # current-season fixtures & standings
+TTL_HISTORICAL = 7 * 86400    # completed seasons & static archives
+
+# One session per worker thread so keep-alive is reused without sharing a
+# Session across threads.
+_thread_local = threading.local()
+
+
+def _session() -> requests.Session:
+    s = getattr(_thread_local, "session", None)
+    if s is None:
+        s = requests.Session()
+        _thread_local.session = s
+    return s
+
 
 def _cache_key(url: str, ext: str = ".json") -> str:
     return hashlib.sha256(url.encode()).hexdigest() + ext
+
+
+# Serialises concurrent fetches of the same URL so parallel callers share
+# one HTTP request instead of racing each other (and the cache file).
+_CACHE_LOCKS: Dict[str, threading.Lock] = {}
+_CACHE_LOCKS_GUARD = threading.Lock()
+
+
+def _cache_lock(key: str) -> threading.Lock:
+    with _CACHE_LOCKS_GUARD:
+        return _CACHE_LOCKS.setdefault(key, threading.Lock())
 
 
 def _is_cache_valid(cache_path: Path, ttl_seconds: int) -> bool:
@@ -39,6 +70,16 @@ def _is_cache_valid(cache_path: Path, ttl_seconds: int) -> bool:
         return age < ttl_seconds
     except Exception:
         return False
+
+
+def _write_cache(cache_path: Path, data: Any, raw: bool) -> None:
+    tmp = cache_path.with_name(cache_path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        if raw:
+            f.write(data)
+        else:
+            json.dump(data, f)
+    os.replace(tmp, cache_path)
 
 
 def cached_get(
@@ -65,34 +106,29 @@ def cached_get(
     key = _cache_key(url, ext=ext)
     cache_path = CACHE_DIR / key
 
-    if _is_cache_valid(cache_path, ttl_seconds):
-        try:
-            with open(cache_path, "r", encoding="utf-8") as f:
-                return f.read() if raw else json.load(f)
-        except Exception:
-            pass
-
-    try:
-        response = requests.get(url, headers=headers, timeout=timeout)
-        response.raise_for_status()
-        if raw:
-            data = response.text
-            with open(cache_path, "w", encoding="utf-8") as f:
-                f.write(data)
-            return data
-        data = response.json()
-        with open(cache_path, "w", encoding="utf-8") as f:
-            json.dump(data, f)
-        return data
-    except Exception as exc:
-        logger.warning(f"Failed to fetch {url}: {exc}")
-        # Serve stale cache if it exists
-        if cache_path.exists():
+    with _cache_lock(key):
+        if _is_cache_valid(cache_path, ttl_seconds):
             try:
                 with open(cache_path, "r", encoding="utf-8") as f:
                     return f.read() if raw else json.load(f)
             except Exception:
                 pass
+
+        try:
+            response = _session().get(url, headers=headers, timeout=timeout)
+            response.raise_for_status()
+            data = response.text if raw else response.json()
+            _write_cache(cache_path, data, raw)
+            return data
+        except Exception as exc:
+            logger.warning(f"Failed to fetch {url}: {exc}")
+            # Serve stale cache if it exists
+            if cache_path.exists():
+                try:
+                    with open(cache_path, "r", encoding="utf-8") as f:
+                        return f.read() if raw else json.load(f)
+                except Exception:
+                    pass
     return None
 
 

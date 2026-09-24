@@ -29,6 +29,11 @@ def _draw_prob(elo_diff: float) -> float:
 
 RECENCY_HALF_LIFE_DAYS = 180.0
 
+# Shrink per-team attack/defense ratings toward the league mean when a team
+# has few matches — otherwise small samples produce unrealistic xG.
+ATTACK_SHRINK_GAMES = 8.0
+MAX_EXPECTED_GOALS = 5.0
+
 # Tuning weights for the context (log position / points-per-game) adjustment.
 POSITION_WEIGHT = 0.24
 PPG_WEIGHT = 0.20
@@ -79,8 +84,14 @@ class PredictionEngine:
         self.name_index: Dict[str, str] = {}
         self.teams: set = set()
 
-    def fit(self, matches: List[Dict[str, Any]]) -> None:
-        """Train on a list of full-time match dicts."""
+    def fit(
+        self,
+        matches: List[Dict[str, Any]],
+        initial_elo: Optional[Dict[str, float]] = None,
+    ) -> None:
+        """Train on a list of full-time match dicts. `initial_elo` seeds
+        starting ratings (e.g. national-team rankings) instead of 1500."""
+        self._initial_elo = initial_elo or {}
         records = [
             m
             for m in matches
@@ -117,19 +128,26 @@ class PredictionEngine:
         self.league_avg_away = max(_weighted_avg(df["away_score"].values, df["weight"].values), 0.1)
         self.home_advantage = max(1.05, min(1.4, self.league_avg_home / self.league_avg_away))
 
-        # Attack/defense ratings with recency weighting
-        def _group_weighted(group_df, value_col):
-            return _weighted_avg(group_df[value_col].values, group_df["weight"].values)
+        # Attack/defense ratings with recency weighting, shrunk toward the
+        # league mean for small samples (a team that played 3 games shouldn't
+        # get a 4x attack rating).
+        def _shrunk_ratios(group_col: str, score_col: str, avg: float) -> Dict[str, float]:
+            ratios: Dict[str, float] = {}
+            for team, grp in df.groupby(group_col):
+                w = grp["weight"].values
+                g = grp[score_col].values
+                wsum = float(w.sum())
+                raw = _weighted_avg(g, w)
+                shrunk = (raw * wsum + ATTACK_SHRINK_GAMES * avg) / (
+                    wsum + ATTACK_SHRINK_GAMES
+                )
+                ratios[team] = shrunk / avg
+            return ratios
 
-        home_goals = df.groupby("home_team").apply(_group_weighted, "home_score", include_groups=False).to_dict()
-        home_conceded = df.groupby("home_team").apply(_group_weighted, "away_score", include_groups=False).to_dict()
-        away_goals = df.groupby("away_team").apply(_group_weighted, "away_score", include_groups=False).to_dict()
-        away_conceded = df.groupby("away_team").apply(_group_weighted, "home_score", include_groups=False).to_dict()
-
-        self.home_attack = {t: g / self.league_avg_home for t, g in home_goals.items()}
-        self.home_defense = {t: g / self.league_avg_away for t, g in home_conceded.items()}
-        self.away_attack = {t: g / self.league_avg_away for t, g in away_goals.items()}
-        self.away_defense = {t: g / self.league_avg_home for t, g in away_conceded.items()}
+        self.home_attack = _shrunk_ratios("home_team", "home_score", self.league_avg_home)
+        self.home_defense = _shrunk_ratios("home_team", "away_score", self.league_avg_away)
+        self.away_attack = _shrunk_ratios("away_team", "away_score", self.league_avg_away)
+        self.away_defense = _shrunk_ratios("away_team", "home_score", self.league_avg_home)
 
         # Elo ratings
         self._fit_elo(df)
@@ -190,7 +208,8 @@ class PredictionEngine:
         return name
 
     def _fit_elo(self, df: pd.DataFrame, k: float = 30.0, home_field: float = 70.0):
-        self.elo = {t: 1500.0 for t in self.teams}
+        priors = getattr(self, "_initial_elo", {})
+        self.elo = {t: float(priors.get(t, 1500.0)) for t in self.teams}
         for _, row in df.sort_values("date").iterrows():
             home = row["home_team"]
             away = row["away_team"]
@@ -306,8 +325,14 @@ class PredictionEngine:
         ha = 1.0 if neutral else self.home_advantage
         ah = 1.0 / ha
 
-        home_exp = max(0.1, self.league_avg_home * home_attack * away_defense * ha)
-        away_exp = max(0.1, self.league_avg_away * away_attack * home_defense * ah)
+        home_exp = max(
+            0.1,
+            min(MAX_EXPECTED_GOALS, self.league_avg_home * home_attack * away_defense * ha),
+        )
+        away_exp = max(
+            0.1,
+            min(MAX_EXPECTED_GOALS, self.league_avg_away * away_attack * home_defense * ah),
+        )
 
         # Elo-based outcome probabilities
         field = 0.0 if neutral else 70.0
@@ -424,8 +449,19 @@ class PredictionEngine:
         remaining = 1.0 - draw
         home_win = expected_home * remaining
         away_win = (1.0 - expected_home) * remaining
-        home_exp = max(0.5, 2.5 * (home_elo / (home_elo + away_elo)) * 1.1)
-        away_exp = max(0.5, 2.5 * (away_elo / (home_elo + away_elo)))
+        home_exp = max(0.5, min(4.0, 2.5 * (home_elo / (home_elo + away_elo)) * 1.1))
+        away_exp = max(0.5, min(4.0, 2.5 * (away_elo / (home_elo + away_elo))))
+
+        # Most likely scoreline under independent Poissons — same rule as the
+        # trained path so seeded-elo predictions don't all read 1-1.
+        best_score, max_prob = "1-1", 0.0
+        for i in range(7):
+            p_i = _poisson_pmf(i, home_exp)
+            for j in range(7):
+                p = p_i * _poisson_pmf(j, away_exp)
+                if p > max_prob:
+                    max_prob = p
+                    best_score = f"{i}-{j}"
 
         return {
             "home_team": home_team,
@@ -438,8 +474,8 @@ class PredictionEngine:
                 "away_win": round(away_win, 4),
             },
             "predicted_score": {
-                "score": f"{round(home_exp)}-{round(away_exp)}",
-                "probability": 0.0,
+                "score": best_score,
+                "probability": round(max_prob, 4),
             },
             "over_under_2_5": {
                 "over": round(0.5 + (home_exp + away_exp - 2.5) * 0.1, 4),

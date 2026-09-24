@@ -3,12 +3,15 @@
 import difflib
 import json
 import logging
+import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Set
 
 from .prediction_engine import PredictionEngine
+from .sources.bbc import BBCSource
 from .sources.composite import CompositeDataSource
 from .sources.fixture_download import FixtureDownloadSource
 from .sources.football_data import FootballDataSource
@@ -22,6 +25,56 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 LEAGUES_PATH = PROJECT_ROOT / "data" / "leagues.json"
 MODEL_CACHE_DIR = PROJECT_ROOT / "data" / "cache"
 MODEL_TTL = 1800  # seconds
+NATIONAL_RANKINGS_PATH = PROJECT_ROOT / "data" / "national_rankings.json"
+
+# Matches youth/reserve/women's sides in international feeds,
+# e.g. "Portugal U17", "Germany U21", "England Women".
+_NON_SENIOR_TEAM = re.compile(r"\bU-?\d{2}\b|\bWomen\b|\bLadies\b", re.IGNORECASE)
+
+# Feed/display name -> name used in national_rankings.json.
+_NATIONAL_ALIASES = {
+    "Côte d'Ivoire": "Ivory Coast",
+    "Cape Verde": "Cabo Verde",
+    "Czech Republic": "Czechia",
+    "Democratic Republic of the Congo": "DR Congo",
+    "Congo DR": "DR Congo",
+    "Korea South": "South Korea",
+    "North Korea": "Korea DPR",
+    "Russia": "Russia",
+    "Swaziland": "Eswatini",
+    "The Gambia": "Gambia",
+    "Ireland": "Republic of Ireland",
+    "Turkey": "Türkiye",
+}
+
+_national_rankings_cache: Optional[Dict[str, float]] = None
+
+
+def _load_national_rankings() -> Dict[str, float]:
+    """National-team strength priors used to seed Elo for internationals."""
+    global _national_rankings_cache
+    if _national_rankings_cache is None:
+        _national_rankings_cache = {}
+        try:
+            with open(NATIONAL_RANKINGS_PATH, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            for k, v in raw.items():
+                if not k.startswith("_") and isinstance(v, (int, float)):
+                    _national_rankings_cache[k] = float(v)
+        except Exception as exc:
+            logger.warning(f"Could not load national rankings: {exc}")
+    return _national_rankings_cache
+
+
+def _senior_teams_only(matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [
+        m
+        for m in matches
+        if not (
+            _NON_SENIOR_TEAM.search(m.get("home_team") or "")
+            or _NON_SENIOR_TEAM.search(m.get("away_team") or "")
+        )
+    ]
 
 
 class LeagueService:
@@ -31,6 +84,7 @@ class LeagueService:
         self._leagues = self._load_leagues()
         self._match_sources = [
             FixtureDownloadSource(),
+            BBCSource(),
             FootballDataSource(),
             OpenfootballSource(),
             PSLScraperSource(),
@@ -73,11 +127,13 @@ class LeagueService:
 
     def _refresh(self):
         self.matches = self._source.get_matches(self._current_league)
-        self._match_source_name = self._detect_source(self._match_sources, "matches")
+        self._match_source_name = self._source.last_matches_source
+        if self._current_league.get("senior_only"):
+            self.matches = _senior_teams_only(self.matches)
         self.standings = self._source.get_standings(self._current_league)
-        self._standings_source_name = self._detect_source(self._standings_sources, "standings")
+        self._standings_source_name = self._source.last_standings_source
         # Fallback to a live table computed from results if no source provides standings.
-        if not self.standings and self.matches:
+        if not self.standings and self.matches and not self._current_league.get("no_table"):
             self._standings_source_name = "computed"
 
         # Pull openfootball history as extra training data when the live source is different
@@ -135,16 +191,20 @@ class LeagueService:
 
     def _load_related(self) -> Dict[str, Dict[str, Any]]:
         """Fetch matches and standings for leagues listed in `related`."""
-        related: Dict[str, Dict[str, Any]] = {}
-        for code in self._current_league.get("related", []):
-            cfg = self._leagues.get(code)
-            if not cfg:
-                continue
+        entries = [
+            (code, self._leagues[code])
+            for code in self._current_league.get("related", [])
+            if code in self._leagues
+        ]
+
+        def _fetch(code: str, cfg: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
             try:
                 matches = self._source.get_matches(cfg)
             except Exception as exc:
                 logger.warning(f"Related league {code} matches failed: {exc}")
                 matches = []
+            if cfg.get("senior_only"):
+                matches = _senior_teams_only(matches)
             for m in matches:
                 m["competition"] = code
             try:
@@ -154,7 +214,12 @@ class LeagueService:
                 table = []
             if not table and matches:
                 table = self._compute_table(matches)
-            related[code] = {"matches": matches, "standings": table}
+            return code, {"matches": matches, "standings": table}
+
+        related: Dict[str, Dict[str, Any]] = {}
+        with ThreadPoolExecutor(max_workers=min(6, len(entries) or 1)) as pool:
+            for code, data in pool.map(lambda e: _fetch(*e), entries):
+                related[code] = data
         return related
 
     def _build_team_contexts(self) -> Dict[str, Dict[str, Any]]:
@@ -204,22 +269,14 @@ class LeagueService:
         """Public helper to reload data and retrain the model."""
         self._refresh()
 
-    def _detect_source(self, sources: List[Any], method: str) -> Optional[str]:
-        for s in sources:
-            if not s.is_available(self._current_league):
-                continue
-            fn = getattr(s, f"get_{method}")
-            try:
-                data = fn(self._current_league)
-            except Exception as exc:
-                logger.warning(f"Source {s.name} failed for {method}: {exc}")
-                continue
-            if data:
-                return s.name
-        return None
-
     def get_leagues(self) -> List[Tuple[str, str]]:
-        return [(code, cfg["name"]) for code, cfg in self._leagues.items()]
+        # Grouped leagues (e.g. international competitions) are browsed on
+        # their dedicated group page, not via the league selector.
+        return [
+            (code, cfg["name"])
+            for code, cfg in self._leagues.items()
+            if not cfg.get("group")
+        ]
 
     def get_current_code(self) -> str:
         return self._current_code
@@ -242,6 +299,57 @@ class LeagueService:
 
     def get_matches(self) -> List[Dict[str, Any]]:
         return self.matches
+
+    def get_group_leagues(self, group: str) -> List[Tuple[str, str]]:
+        """(code, name) pairs for every league in a group — no fetching."""
+        return [
+            (code, cfg["name"])
+            for code, cfg in self._leagues.items()
+            if cfg.get("group") == group
+        ]
+
+    def get_group_matches(
+        self, group: str, on_progress=None
+    ) -> List[Dict[str, Any]]:
+        """Return matches from every league tagged with the given group,
+        each tagged with its competition code and name. `on_progress` is
+        invoked with (code, name) as each league finishes."""
+        entries = [
+            (code, cfg)
+            for code, cfg in self._leagues.items()
+            if cfg.get("group") == group
+        ]
+
+        def _fetch(item: Tuple[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+            code, cfg = item
+            try:
+                league_matches = self._source.get_matches(cfg)
+            except Exception as exc:
+                logger.warning(f"Group league {code} matches failed: {exc}")
+                return []
+            if cfg.get("senior_only"):
+                league_matches = _senior_teams_only(league_matches)
+            for m in league_matches:
+                m["competition"] = code
+                m["competition_name"] = cfg.get("name", code)
+            return league_matches
+
+        matches: List[Dict[str, Any]] = []
+        with ThreadPoolExecutor(max_workers=min(8, len(entries) or 1)) as pool:
+            futures = {pool.submit(_fetch, e): e for e in entries}
+            for fut in as_completed(futures):
+                code, cfg = futures[fut]
+                try:
+                    matches.extend(fut.result())
+                except Exception as exc:
+                    logger.warning(f"Group league {code} matches failed: {exc}")
+                if on_progress:
+                    try:
+                        on_progress(code, cfg.get("name", code))
+                    except Exception:
+                        pass
+        matches.sort(key=lambda x: x["date"] or "")
+        return matches
 
     def get_live_matches(self) -> List[Dict[str, Any]]:
         """Return currently live matches, with a fast path for Football-Data."""
@@ -337,6 +445,9 @@ class LeagueService:
         return self._compute_table(self.matches)
 
     def get_standings(self) -> List[Dict[str, Any]]:
+        # Some competitions (e.g. friendlies) have no meaningful table.
+        if self._current_league.get("no_table"):
+            return []
         if not self.standings:
             return self._compute_table_from_matches()
         return self.standings
@@ -450,14 +561,37 @@ class LeagueService:
         self._engine = PredictionEngine.from_dict(data)
         logger.info(f"Loaded persisted model for {self._current_code}")
 
+    def _national_seed(self) -> Dict[str, float]:
+        """Elo priors for national teams — only used for international leagues."""
+        if not self._current_league or self._current_league.get("group") != "international":
+            return {}
+        ranks = _load_national_rankings()
+        if not ranks:
+            return {}
+        seed = dict(ranks)
+        for feed_name, rank_name in _NATIONAL_ALIASES.items():
+            if rank_name in ranks:
+                seed[feed_name] = ranks[rank_name]
+        return seed
+
     def _load_or_fit_model(self) -> None:
         if self._model_is_fresh():
             try:
                 self._load_model()
-                return
             except Exception as exc:
                 logger.warning(f"Persisted model invalid, retraining: {exc}")
-        self._fit_model()
+                self._fit_model()
+        else:
+            self._fit_model()
+        self._seed_national_elo()
+
+    def _seed_national_elo(self) -> None:
+        """Merge ranking priors into the engine's Elo table. Trained values
+        win where they exist; seeded ratings make the fallback path useful
+        for national teams with no completed-match history."""
+        seed = self._national_seed()
+        if seed:
+            self._engine.elo = {**seed, **self._engine.elo}
 
     def _fit_model(self) -> None:
         """Train the prediction engine on current + historical matches."""
@@ -468,7 +602,7 @@ class LeagueService:
         for data in self._related.values():
             training.extend(data["matches"])
         self._engine = PredictionEngine()
-        self._engine.fit(training)
+        self._engine.fit(training, initial_elo=self._national_seed())
         self._save_model()
 
     def predict(self, home_team: str, away_team: str, neutral: bool = False) -> Dict[str, Any]:

@@ -18,8 +18,9 @@ try:
 except Exception:
     pass
 
-from app.ui import apply_theme
+from app.ui import apply_theme, get_league_service
 from src.data import LeagueService
+from src.data.league_service import LEAGUES_PATH
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,11 +35,14 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+INTERNATIONAL_CODE = "INTL"
+
 PAGES = {
     "🏠 Home": "Home",
     "⚽ Live": "Live",
     "📅 Fixtures": "Fixtures",
     "🗓️ Today's Fixtures": "TodaysFixtures",
+    "🌍 International": "International",
     "📊 Table": "Table",
     "🔮 Predictions": "Predictions",
     "📈 Stats": "Stats",
@@ -73,7 +77,7 @@ def _save_preferences():
 def init_session_state():
     if "league_service" not in st.session_state:
         default = _default_league_code()
-        st.session_state.league_service = LeagueService(default)
+        st.session_state.league_service = get_league_service(default)
     if "current_page" not in st.session_state:
         st.session_state.current_page = "Home"
     if "last_league" not in st.session_state:
@@ -82,43 +86,49 @@ def init_session_state():
         prefs = _load_preferences()
         teams = st.session_state.league_service.get_teams()
         fav = st.query_params.get("fav") or prefs.get("favourite_team")
-        st.session_state.favourite_team = fav if fav in teams else (teams[0] if teams else None)
+        st.session_state.favourite_team = fav if fav in teams else None
 
 
 def _default_league_code() -> str:
     prefs = _load_preferences()
     candidate = st.query_params.get("league") or prefs.get("last_league")
     try:
-        service = LeagueService()
-        codes = [c for c, _ in service.get_leagues()]
-        if candidate and candidate in codes:
+        # Read the registry directly — building a service just to pick a
+        # league code would trigger a needless full data fetch.
+        with open(LEAGUES_PATH, "r", encoding="utf-8") as f:
+            leagues = json.load(f)
+        selectable = [
+            (code, cfg) for code, cfg in leagues.items() if not cfg.get("group")
+        ]
+        if candidate and candidate in [c for c, _ in selectable]:
             return candidate
-        for code, _ in service.get_leagues():
-            if service._leagues.get(code, {}).get("default"):
+        for code, cfg in selectable:
+            if cfg.get("default"):
                 return code
-        return codes[0]
+        return selectable[0][0]
     except Exception:
         return candidate or "PL"
 
 
 def _change_league():
     new_code = st.session_state.get("league_select")
-    if new_code and new_code != st.session_state.league_service.get_current_code():
-        st.session_state.league_service.set_league(new_code)
+    if not new_code:
+        return
+    # "International" is a pseudo-entry that opens the international page.
+    if new_code == INTERNATIONAL_CODE:
+        st.session_state.current_page = "International"
+        return
+    if st.session_state.current_page == "International":
+        st.session_state.current_page = "Home"
+    if new_code != st.session_state.league_service.get_current_code():
+        # Swap to the shared cached service rather than mutating it.
+        st.session_state.league_service = get_league_service(new_code)
         st.session_state.last_league = new_code
         st.query_params["league"] = new_code
         _save_preferences()
         # Predictions are league-specific; stale ones cause display errors.
         st.session_state.pop("last_prediction", None)
         st.session_state.pop("fixture_predictions", None)
-
-
-def _change_favourite():
-    new_fav = st.session_state.get("fav_select")
-    if new_fav:
-        st.session_state.favourite_team = new_fav
-        st.query_params["fav"] = new_fav
-        _save_preferences()
 
 
 def render_sidebar():
@@ -142,33 +152,23 @@ def render_sidebar():
 
         st.markdown("---")
 
-        # League selector
+        # League selector — "International" is a pseudo-entry that opens the
+        # international page rather than switching the league context.
         leagues = service.get_leagues()
-        default_index = [c for c, _ in leagues].index(service.get_current_code())
+        names = dict(leagues)
+        names[INTERNATIONAL_CODE] = "🌍 International"
+        options = [c for c, _ in leagues] + [INTERNATIONAL_CODE]
+        on_intl = st.session_state.current_page == "International"
+        st.session_state["league_select"] = (
+            INTERNATIONAL_CODE if on_intl else service.get_current_code()
+        )
         st.selectbox(
             "🏆 Select League",
-            options=[c for c, _ in leagues],
-            format_func=lambda x: service._leagues[x]["name"],
-            index=default_index,
+            options=options,
+            format_func=lambda x: names.get(x, x),
             key="league_select",
             on_change=_change_league,
         )
-
-        # Favourite team
-        teams = service.get_teams()
-        if teams:
-            fav = st.session_state.get("favourite_team")
-            if not fav or fav not in teams:
-                fav = teams[0]
-                st.session_state.favourite_team = fav
-            fav_index = teams.index(fav)
-            st.selectbox(
-                "⭐ Favourite Team",
-                options=teams,
-                index=fav_index,
-                key="fav_select",
-                on_change=_change_favourite,
-            )
 
         st.markdown("---")
 
@@ -227,6 +227,9 @@ def render_page():
         elif page == "TodaysFixtures":
             from app.pages import todays_fixtures
             todays_fixtures.render(service)
+        elif page == "International":
+            from app.pages import international
+            international.render(service)
         elif page == "Table":
             from app.pages import table
             table.render(service)

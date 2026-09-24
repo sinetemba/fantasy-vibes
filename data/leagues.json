@@ -133,5 +133,157 @@
       "league_id": "4346",
       "season": "2026-2027"
     }
+  },
+  "INTF": {
+    "name": "International Friendlies",
+    "country": "World",
+    "group": "international",
+    "no_table": true,
+    "senior_only": true,
+    "related": ["WCQAFC", "WCQCAF", "WCQCOM", "WCQCON", "WCQOFC", "WCQUEFA", "AFCONQ", "ASIANQ", "GCQ", "UNL", "CNL"],
+    "bbc": {
+      "tournaments": ["Friendlies"]
+    },
+    "thesportsdb": {
+      "league_id": "4562",
+      "season": "2026",
+      "historical": ["2025", "2024"]
+    }
+  },
+  "UNL": {
+    "name": "UEFA Nations League",
+    "country": "Europe",
+    "group": "international",
+    "related": ["INTF", "WCQUEFA"],
+    "bbc": {
+      "tournaments": ["UEFA Nations League"]
+    },
+    "fixturedownload": {
+      "slug": "nations-league",
+      "season": "2026",
+      "historical": ["2024"]
+    }
+  },
+  "CNL": {
+    "name": "Concacaf Nations League",
+    "country": "North America",
+    "group": "international",
+    "related": ["INTF", "WCQCON"],
+    "bbc": {
+      "tournaments": ["Concacaf Nations League"]
+    }
+  },
+  "WCQUEFA": {
+    "name": "World Cup Qualifying UEFA",
+    "country": "Europe",
+    "group": "international",
+    "related": ["INTF", "UNL"],
+    "thesportsdb": {
+      "league_id": "5518",
+      "season": "2026",
+      "historical": ["2022"]
+    }
+  },
+  "WCQCAF": {
+    "name": "World Cup Qualifying CAF",
+    "country": "Africa",
+    "group": "international",
+    "related": ["INTF", "AFCONQ"],
+    "thesportsdb": {
+      "league_id": "5514",
+      "season": "2026",
+      "historical": ["2022"]
+    }
+  },
+  "WCQCOM": {
+    "name": "World Cup Qualifying CONMEBOL",
+    "country": "South America",
+    "group": "international",
+    "related": ["INTF"],
+    "thesportsdb": {
+      "league_id": "5515",
+      "season": "2026",
+      "historical": ["2022"]
+    }
+  },
+  "WCQCON": {
+    "name": "World Cup Qualifying CONCACAF",
+    "country": "North America",
+    "group": "international",
+    "related": ["INTF", "GCQ", "CNL"],
+    "thesportsdb": {
+      "league_id": "5516",
+      "season": "2026",
+      "historical": ["2022"]
+    }
+  },
+  "WCQAFC": {
+    "name": "World Cup Qualifying AFC",
+    "country": "Asia",
+    "group": "international",
+    "related": ["INTF", "ASIANQ"],
+    "thesportsdb": {
+      "league_id": "5513",
+      "season": "2026",
+      "historical": ["2022"]
+    }
+  },
+  "WCQOFC": {
+    "name": "World Cup Qualifying OFC",
+    "country": "Oceania",
+    "group": "international",
+    "related": ["INTF"],
+    "thesportsdb": {
+      "league_id": "5517",
+      "season": "2026",
+      "historical": ["2022"]
+    }
+  },
+  "WCQPO": {
+    "name": "World Cup Qualifying Play-offs",
+    "country": "World",
+    "group": "international",
+    "related": ["INTF"],
+    "thesportsdb": {
+      "league_id": "5850",
+      "season": "2026",
+      "historical": ["2022"]
+    }
+  },
+  "AFCONQ": {
+    "name": "Africa Cup of Nations Qualifying",
+    "country": "Africa",
+    "group": "international",
+    "related": ["INTF", "WCQCAF"],
+    "bbc": {
+      "tournaments": ["Africa Cup of Nations Qualification"]
+    },
+    "thesportsdb": {
+      "league_id": "5520",
+      "season": "2027",
+      "historical": ["2025"]
+    }
+  },
+  "ASIANQ": {
+    "name": "AFC Asian Cup Qualifying",
+    "country": "Asia",
+    "group": "international",
+    "related": ["INTF", "WCQAFC"],
+    "thesportsdb": {
+      "league_id": "5521",
+      "season": "2024",
+      "historical": ["2023"]
+    }
+  },
+  "GCQ": {
+    "name": "CONCACAF Gold Cup Qualifying",
+    "country": "North America",
+    "group": "international",
+    "related": ["INTF", "WCQCON"],
+    "thesportsdb": {
+      "league_id": "5522",
+      "season": "2025",
+      "historical": ["2023"]
+    }
   }
 }

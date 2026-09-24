@@ -6,7 +6,7 @@ import urllib.parse
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from ..utils import cached_get, sast_now, to_sast
+from ..utils import TTL_CURRENT, TTL_HISTORICAL, cached_get, sast_now, to_sast
 from .base import DataSource
 
 logger = logging.getLogger(__name__)
@@ -52,7 +52,7 @@ class FootballDataSource(DataSource):
         self,
         path: str,
         params: Optional[Dict] = None,
-        ttl_seconds: int = 300,
+        ttl_seconds: int = TTL_CURRENT,
     ) -> Optional[Dict[str, Any]]:
         if not _load_api_key():
             return None
@@ -69,7 +69,7 @@ class FootballDataSource(DataSource):
         league_config: Dict[str, Any],
         season: Optional[str] = None,
         status_filter: Optional[str] = None,
-        ttl_seconds: int = 300,
+        ttl_seconds: Optional[int] = None,
         date_from: Optional[str] = None,
         date_to: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
@@ -87,7 +87,11 @@ class FootballDataSource(DataSource):
             params["status"] = status_filter
         if not params:
             params = None  # type: ignore[assignment]
-        data = self._api_get(f"/competitions/{code}/matches", params, ttl_seconds=ttl_seconds)
+        # An explicit `season` arg means a historical pull — immutable data.
+        ttl = ttl_seconds
+        if ttl is None:
+            ttl = TTL_HISTORICAL if season else TTL_CURRENT
+        data = self._api_get(f"/competitions/{code}/matches", params, ttl_seconds=ttl)
         if not data:
             return []
 
@@ -147,7 +151,7 @@ class FootballDataSource(DataSource):
 
     def get_live_matches(self, league_config: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Fetch only currently live matches with a short cache so scores update."""
-        return self.get_matches(league_config, status="LIVE", ttl_seconds=15)
+        return self.get_matches(league_config, status_filter="LIVE", ttl_seconds=15)
 
     def get_standings(
         self, league_config: Dict[str, Any], season: Optional[str] = None

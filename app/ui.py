@@ -1,6 +1,7 @@
 """Shared UI components, dark/night mode theming and reusable charts."""
 
 import html
+import threading
 from textwrap import dedent
 from typing import Dict, List, Optional
 
@@ -8,6 +9,28 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+
+from src.data import LeagueService
+
+
+@st.cache_resource(ttl=3600, show_spinner=False)
+def get_league_service(code: str) -> LeagueService:
+    """Shared LeagueService per league code, cached across reruns and sessions."""
+    return LeagueService(code)
+
+
+def prewarm_league_services(codes: List[str], limit: int = 4) -> None:
+    """Build/cache LeagueService objects on daemon threads so first use
+    (data fetch + model training) doesn't block the UI."""
+
+    def _warm(code: str) -> None:
+        try:
+            get_league_service(code)
+        except Exception:
+            pass
+
+    for code in list(codes)[:limit]:
+        threading.Thread(target=_warm, args=(code,), daemon=True).start()
 
 COLORS = {
     "primary": "#37003c",

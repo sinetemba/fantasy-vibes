@@ -1,6 +1,5 @@
 """Today's fixtures page showing matches across all configured leagues."""
 
-import functools
 import json
 import logging
 from datetime import date, datetime
@@ -15,6 +14,7 @@ from app.ui import (
     apply_theme,
     display_disclaimer,
     display_header,
+    get_league_service,
     match_card_html,
     probability_bar,
 )
@@ -115,10 +115,10 @@ def _load_todays_fixtures(today: str) -> List[Dict[str, Any]]:
 
     # Fallback: iterate configured leagues and filter by today's date.
     fallback: List[Dict[str, Any]] = []
-    base = LeagueService()
+    base = get_league_service("PL")
     for code, name in base.get_leagues():
         try:
-            league_service = LeagueService(code)
+            league_service = get_league_service(code)
         except Exception as exc:
             logger.error(f"Could not load league {code}: {exc}")
             continue
@@ -133,10 +133,9 @@ def _load_todays_fixtures(today: str) -> List[Dict[str, Any]]:
     return fallback
 
 
-@functools.lru_cache(maxsize=12)
 def _league_service_for(code: str) -> LeagueService:
     """Return a cached LeagueService for a configured league code."""
-    return LeagueService(code)
+    return get_league_service(code)
 
 
 def _predict_all_matches(matches: List[Dict[str, Any]]) -> Dict[str, Any]:

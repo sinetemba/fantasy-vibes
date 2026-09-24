@@ -1,0 +1,163 @@
+"""BBC Sport source — collated football scores & fixtures (free, no key).
+
+Uses the public JSON feed behind bbc.com/sport/football/scores-fixtures.
+The feed covers a rolling window around today, so it is best for current
+international windows (friendlies, qualifiers, Nations League) rather than
+deep history.
+"""
+
+import calendar
+import logging
+from datetime import date, datetime, timedelta
+from typing import Any, Dict, List, Optional, Tuple
+
+from ..utils import cached_get, sast_now, to_sast
+from .base import DataSource
+
+logger = logging.getLogger(__name__)
+
+BASE_URL = "https://www.bbc.com/wc-data/container/sport-data-scores-fixtures"
+FOOTBALL_URN = "urn:bbc:sportsdata:football"
+
+STATUS_MAP = {
+    "PreEvent": "scheduled",
+    "MidEvent": "live",
+    "PostEvent": "full_time",
+    "Postponed": "postponed",
+    "Cancelled": "cancelled",
+}
+
+# The collated feed only serves windows that don't straddle a month
+# boundary: the current month can start at most ~7 days before today, and
+# other windows must be inside a single calendar month.
+DEFAULT_DAYS_BACK = 6
+DEFAULT_DAYS_AHEAD = 150
+
+
+def _date_windows(back: int, ahead: int) -> List[Tuple[str, str]]:
+    """(start, end) ISO date pairs covering [~today-7, today+ahead]."""
+    today = sast_now().date()
+    month_last = calendar.monthrange(today.year, today.month)[1]
+    month_start = date(today.year, today.month, 1)
+    month_end = date(today.year, today.month, month_last)
+
+    windows = [
+        (
+            max(today - timedelta(days=min(back, 6)), month_start).isoformat(),
+            month_end.isoformat(),
+        )
+    ]
+    horizon = today + timedelta(days=ahead)
+    y, m = (today.year, today.month + 1) if today.month < 12 else (today.year + 1, 1)
+    while True:
+        start = date(y, m, 1)
+        if start > horizon:
+            break
+        windows.append(
+            (start.isoformat(), date(y, m, calendar.monthrange(y, m)[1]).isoformat())
+        )
+        y, m = (y, m + 1) if m < 12 else (y + 1, 1)
+    return windows
+
+
+class BBCSource(DataSource):
+    """Provider that reads BBC Sport's collated football scores feed."""
+
+    name = "bbc"
+
+    def is_available(self, league_config: Dict[str, Any]) -> bool:
+        return "bbc" in league_config
+
+    def _fetch(self, start: str, end: str) -> List[Dict[str, Any]]:
+        today = sast_now().date().isoformat()
+        url = (
+            f"{BASE_URL}?urn={FOOTBALL_URN}"
+            f"&selectedStartDate={start}&selectedEndDate={end}&todayDate={today}"
+        )
+        data = cached_get(url, ttl_seconds=900)
+        if not data:
+            return []
+        return data.get("eventGroups") or []
+
+    def get_matches(
+        self, league_config: Dict[str, Any], season: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        cfg = league_config.get("bbc", {})
+        tournaments = set(cfg.get("tournaments") or [])
+        if not tournaments:
+            return []
+
+        back = int(cfg.get("days_back", DEFAULT_DAYS_BACK))
+        ahead = int(cfg.get("days_ahead", DEFAULT_DAYS_AHEAD))
+
+        matches: List[Dict[str, Any]] = []
+        for start, end in _date_windows(back, ahead):
+            for group in self._fetch(start, end):
+                for sub in group.get("secondaryGroups") or []:
+                    round_label = sub.get("displayLabel") or ""
+                    for e in sub.get("events") or []:
+                        if (e.get("tournament") or {}).get("name") not in tournaments:
+                            continue
+                        m = self._to_match(e, round_label)
+                        if m:
+                            matches.append(m)
+
+        matches.sort(key=lambda x: x["date"] or "")
+        return matches
+
+    def _to_match(
+        self, e: Dict[str, Any], round_label: str
+    ) -> Optional[Dict[str, Any]]:
+        home = (e.get("home") or {}).get("fullName", "").strip()
+        away = (e.get("away") or {}).get("fullName", "").strip()
+        if not home or not away:
+            return None
+
+        period = (e.get("periodLabel") or {}).get("value", "")
+        status = STATUS_MAP.get(e.get("status"), "scheduled")
+        if status == "live" and period == "HT":
+            status = "half_time"
+
+        home_score = away_score = None
+        if status in ("full_time", "live", "half_time"):
+            try:
+                home_score = int((e["home"].get("score")))
+                away_score = int((e["away"].get("score")))
+            except (TypeError, ValueError, KeyError):
+                home_score = away_score = None
+                if status == "full_time":
+                    status = "scheduled"
+
+        dt = None
+        start = e.get("startDateTime")
+        if start:
+            try:
+                dt = to_sast(datetime.fromisoformat(start.replace("Z", "+00:00")), "UTC")
+            except ValueError:
+                pass
+
+        if period:
+            minutes = period
+        elif status == "scheduled" and dt is not None:
+            minutes = dt.strftime("%H:%M") + " SAST"
+        else:
+            minutes = status.replace("_", " ").title()
+
+        return {
+            "match_id": e.get("id") or f"bbc_{home}_{away}_{e.get('startDateTime')}",
+            "home_team": home,
+            "away_team": away,
+            "home_score": home_score,
+            "away_score": away_score,
+            "date": dt.isoformat() if dt else None,
+            "round": round_label,
+            "status": status,
+            "minutes_elapsed": minutes,
+            "venue": None,
+            "source": self.name,
+        }
+
+    def get_standings(
+        self, league_config: Dict[str, Any], season: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        return []

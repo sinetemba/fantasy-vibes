@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-from ..utils import cached_get, sast_now, to_sast
+from ..utils import TTL_HISTORICAL, cached_get, sast_now, to_sast
 from .base import DataSource
 
 logger = logging.getLogger(__name__)
@@ -98,7 +98,7 @@ class OpenfootballSource(DataSource):
         season = cfg.get("season", "2025-26")
         path = cfg.get("path", "en.1.json")
         url = f"{OPENFOOTBALL_BASE}/{season}/{path}"
-        return cached_get(url, ttl_seconds=86400)
+        return cached_get(url, ttl_seconds=TTL_HISTORICAL)
 
     def get_matches(
         self, league_config: Dict[str, Any], season: Optional[str] = None

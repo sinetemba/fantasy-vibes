@@ -5,7 +5,7 @@ import os
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
-from ..utils import cached_get, to_sast
+from ..utils import TTL_CURRENT, TTL_HISTORICAL, TTL_LIVE, cached_get, to_sast
 from .base import DataSource
 
 logger = logging.getLogger(__name__)
@@ -53,7 +53,10 @@ class TheSportsDBSource(DataSource):
             return []
         season_param = season or cfg.get("season", "")
         season_url = f"{self._base_url()}/eventsseason.php?id={league_id}&s={season_param}"
-        data = cached_get(season_url, ttl_seconds=3600)
+        # An explicit `season` arg means a historical pull — immutable data.
+        data = cached_get(
+            season_url, ttl_seconds=TTL_HISTORICAL if season else TTL_CURRENT
+        )
 
         events = []
         if data:
@@ -63,7 +66,7 @@ class TheSportsDBSource(DataSource):
         # not included in the full-season response (e.g. UEFA competitions).
         if season_param and season_param == cfg.get("season"):
             next_url = f"{self._base_url()}/eventsnextleague.php?id={league_id}"
-            next_data = cached_get(next_url, ttl_seconds=1800)
+            next_data = cached_get(next_url, ttl_seconds=900)
             if next_data:
                 seen = {e.get("idEvent") for e in events}
                 for e in next_data.get("events") or []:
@@ -128,7 +131,10 @@ class TheSportsDBSource(DataSource):
         target = target_date or date.today()
         date_str = target.strftime("%Y-%m-%d")
         url = f"{self._base_url()}/eventsday.php?d={date_str}&s=Soccer"
-        data = cached_get(url, ttl_seconds=1800)
+        data = cached_get(
+            url,
+            ttl_seconds=TTL_LIVE if target == date.today() else TTL_HISTORICAL,
+        )
         if not data:
             return []
 
@@ -207,7 +213,9 @@ class TheSportsDBSource(DataSource):
             return []
         season_param = season or cfg.get("season", "")
         url = f"{self._base_url()}/lookuptable.php?l={league_id}&s={season_param}"
-        data = cached_get(url, ttl_seconds=3600)
+        data = cached_get(
+            url, ttl_seconds=TTL_HISTORICAL if season else TTL_CURRENT
+        )
         if not data:
             return []
 

@@ -6,7 +6,9 @@ swappable, multi-source data layer so new leagues and providers can be added eas
 
 ## ✨ Features
 
-- 🏆 **Multi-league support** — Premier League, Bundesliga, Serie A, La Liga, Ligue 1.
+- 🏆 **Multi-league support** — Premier League, Bundesliga, Serie A, La Liga, Ligue 1,
+  PSL, MLS, Champions League, Europa League, international friendlies and
+  World Cup / continental qualifiers (via TheSportsDB).
 - 📡 **Multiple free data sources** — football-data.org, thesportsdb.com and the public
   `openfootball/football.json` dataset.
 - 🌙 **Night mode UI** — dark theme by default with custom cards and Plotly charts.

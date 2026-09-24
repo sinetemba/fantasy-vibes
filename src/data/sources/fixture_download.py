@@ -7,7 +7,7 @@ import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from ..utils import cached_get, to_sast
+from ..utils import TTL_CURRENT, TTL_HISTORICAL, cached_get, to_sast
 from .base import DataSource
 
 logger = logging.getLogger(__name__)
@@ -23,9 +23,13 @@ class FixtureDownloadSource(DataSource):
     def is_available(self, league_config: Dict[str, Any]) -> bool:
         return "fixturedownload" in league_config
 
-    def _fetch(self, slug: str, season: str) -> List[Dict[str, Any]]:
+    def _fetch(self, slug: str, season: str, historical: bool = False) -> List[Dict[str, Any]]:
         url = f"{BASE_URL}/{slug}-{season}"
-        text = cached_get(url, ttl_seconds=3600, raw=True)
+        text = cached_get(
+            url,
+            ttl_seconds=TTL_HISTORICAL if historical else TTL_CURRENT,
+            raw=True,
+        )
         if not text:
             return []
         m = re.search(r"<textarea[^>]*>(.*?)</textarea>", text, re.DOTALL)
@@ -49,7 +53,8 @@ class FixtureDownloadSource(DataSource):
         if not season_param:
             return []
 
-        events = self._fetch(slug, season_param)
+        # An explicit `season` arg means a historical pull — immutable data.
+        events = self._fetch(slug, season_param, historical=season is not None)
         if not events:
             return []
 
