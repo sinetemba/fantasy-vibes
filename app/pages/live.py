@@ -14,11 +14,13 @@ from app.ui import (
     show_warning_message,
 )
 from src.data import LeagueService
-from src.data.utils import is_upcoming
+from src.data.utils import bust_live_cache, is_upcoming
 
 
 def _refresh(service: LeagueService):
-    """Public refresh helper for the current league."""
+    """Public refresh helper for the current league — opens a live-refresh
+    window so the fetch bypasses HTTP TTLs and returns live scores."""
+    bust_live_cache(30)
     service.refresh()
 
 
@@ -49,6 +51,11 @@ def render(service: LeagueService):
 
         @st.fragment(run_every=run_every)
         def _live_body():
+            if interval:
+                # Live data only: bypass HTTP TTLs for this fragment's fetch
+                # and re-pull just the match list — standings/model untouched.
+                bust_live_cache(60)
+                service.refresh_live_matches()
             _render_match_lists(service)
 
         _live_body()

@@ -85,7 +85,7 @@ def prune_cache(max_age_seconds: int = CACHE_MAX_AGE) -> int:
             prunable = (
                 _PRUNABLE.match(f.name)
                 or f.suffix == ".tmp"
-                or f.name == "psl_matchcentre.html"
+                or f.name in ("psl_matchcentre.html", "psl_log.html")
             )
             if prunable and f.is_file() and f.stat().st_mtime < cutoff:
                 f.unlink()
@@ -95,6 +95,29 @@ def prune_cache(max_age_seconds: int = CACHE_MAX_AGE) -> int:
     if removed:
         logger.info(f"Pruned {removed} stale cache files")
     return removed
+
+
+# Live-refresh window: while open, cache entries are only trusted for
+# LIVE_TTL seconds so refresh/auto-refresh pull live scores. Files are
+# never deleted — other pages keep their cached data once it closes.
+LIVE_TTL = 15
+_LIVE_WINDOW_UNTIL = 0.0
+_LIVE_WINDOW_GUARD = threading.Lock()
+
+
+def bust_live_cache(seconds: float = 45) -> None:
+    """Open a live-refresh window for `seconds`."""
+    global _LIVE_WINDOW_UNTIL
+    with _LIVE_WINDOW_GUARD:
+        _LIVE_WINDOW_UNTIL = time.time() + seconds
+
+
+def cache_ttl(ttl_seconds: int) -> int:
+    """Effective TTL — collapsed to LIVE_TTL while a live-refresh window
+    is open so live scores refetch instead of serving stale cache."""
+    if time.time() < _LIVE_WINDOW_UNTIL:
+        return min(ttl_seconds, LIVE_TTL)
+    return ttl_seconds
 
 
 prune_cache()
@@ -145,7 +168,7 @@ def cached_get(
     cache_path = CACHE_DIR / key
 
     with _cache_lock(key):
-        if _is_cache_valid(cache_path, ttl_seconds):
+        if _is_cache_valid(cache_path, cache_ttl(ttl_seconds)):
             try:
                 with open(cache_path, "r", encoding="utf-8") as f:
                     return f.read() if raw else json.load(f)

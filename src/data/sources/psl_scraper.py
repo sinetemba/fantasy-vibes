@@ -10,15 +10,18 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from ..utils import CACHE_DIR, compute_table, to_sast
+from ..prediction_engine import _norm_key
+from ..utils import CACHE_DIR, cache_ttl, compute_table, to_sast
 from .base import DataSource
 
 logger = logging.getLogger(__name__)
 
 PSL_URL = "https://www.psl.co.za/matchcentre"
+PSL_GET_URL = "https://www.psl.co.za/MatchCentre/Get/"
 REQUEST_TIMEOUT = 20
 HTML_CACHE_TTL = 1800  # 30 minutes
 PSL_CACHE_FILE = CACHE_DIR / "psl_matchcentre.html"
+LOG_CACHE_FILE = CACHE_DIR / "psl_log.html"
 
 # Known bad labels on the PSL site where a stadium name leaks into the team field,
 # plus name variants to align with the TheSportsDB spelling.
@@ -57,7 +60,7 @@ class PSLScraperSource(DataSource):
         if not PSL_CACHE_FILE.exists():
             return False
         try:
-            return (time.time() - PSL_CACHE_FILE.stat().st_mtime) < HTML_CACHE_TTL
+            return (time.time() - PSL_CACHE_FILE.stat().st_mtime) < cache_ttl(HTML_CACHE_TTL)
         except Exception:
             return False
 
@@ -217,4 +220,89 @@ class PSLScraperSource(DataSource):
     def get_standings(
         self, league_config: Dict[str, Any], season: Optional[str] = None
     ) -> List[Dict[str, Any]]:
-        return compute_table(self.get_matches(league_config, season))
+        # The match-centre page only covers a rolling window of fixtures, so a
+        # table computed from it misses earlier results. The site's AJAX log
+        # endpoint returns the real season standings; prefer that, with the
+        # computed table as fallback.
+        rows = self._fetch_log_standings(league_config)
+        if not rows:
+            return compute_table(self.get_matches(league_config, season))
+
+        # The log has no form column — attach recent form computed from the
+        # scraped results window.
+        forms = {
+            _norm_key(r["team"]): r["form"]
+            for r in compute_table(self.get_matches(league_config, season))
+        }
+        for r in rows:
+            r["form"] = forms.get(_norm_key(r["team"]), "")
+        return rows
+
+    def _fetch_log_standings(self, league_config: Dict[str, Any]) -> List[Dict[str, Any]]:
+        slug = (league_config.get("psl_scraper") or {}).get("log_slug", "betway-premiership")
+        try:
+            return self._parse_log(self._fetch_log_html(slug))
+        except Exception as exc:
+            logger.warning(f"PSL log fetch failed: {exc}")
+            return []
+
+    def _fetch_log_html(self, slug: str) -> str:
+        try:
+            if LOG_CACHE_FILE.exists() and LOG_CACHE_FILE.stat().st_mtime > time.time() - cache_ttl(HTML_CACHE_TTL):
+                return LOG_CACHE_FILE.read_text(encoding="utf-8")
+            r = requests.get(
+                PSL_GET_URL,
+                params={"leaqueName": slug, "hasLog": "true", "isMatchCentrePage": "true"},
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120.0.0.0 Safari/537.36"
+                    ),
+                    "X-Requested-With": "XMLHttpRequest",
+                    "Referer": PSL_URL,
+                },
+                timeout=REQUEST_TIMEOUT,
+            )
+            r.raise_for_status()
+            html = r.text
+            if "table-standings-logs" not in html:
+                return ""
+            LOG_CACHE_FILE.write_text(html, encoding="utf-8")
+            return html
+        except Exception as exc:
+            logger.warning(f"PSL log request failed: {exc}")
+            if LOG_CACHE_FILE.exists():
+                return LOG_CACHE_FILE.read_text(encoding="utf-8")
+            return ""
+
+    @staticmethod
+    def _parse_log(html: str) -> List[Dict[str, Any]]:
+        body = re.search(r'<tbody id="LogViewContent">(.*?)</tbody>', html, re.DOTALL)
+        if not body:
+            return []
+        rows: List[Dict[str, Any]] = []
+        for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", body.group(1), re.DOTALL):
+            team_m = re.search(r'<h6 class="team-meta__name">([^<]+)</h6>', tr)
+            pos_m = re.search(r'<h5 class="team-meta__name">\s*(\d+)', tr)
+            if not team_m:
+                continue
+
+            def _cell(cls: str) -> int:
+                c = re.search(r'<td class="%s">\s*(-?\d+)\s*</td>' % cls, tr)
+                return int(c.group(1)) if c else 0
+
+            rows.append({
+                "position": int(pos_m.group(1)) if pos_m else len(rows) + 1,
+                "team": _clean_team_name(team_m.group(1)) or "",
+                "played": _cell("logs-played"),
+                "won": _cell("logs-win"),
+                "drawn": _cell("logs-draw"),
+                "lost": _cell("logs-lost"),
+                "goals_for": _cell("logs-goals-for"),
+                "goals_against": _cell("logs-goals-against"),
+                "goal_difference": _cell("logs-goal-diff"),
+                "points": _cell("logs-points"),
+                "form": "",
+            })
+        return rows

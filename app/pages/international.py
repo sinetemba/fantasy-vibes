@@ -17,6 +17,7 @@ from app.ui import (
     show_warning_message,
 )
 from src.data import LeagueService
+from src.data.league_service import match_importance
 
 GROUP = "international"
 MAX_RENDERED = 150
@@ -120,7 +121,7 @@ def _render_filter_widgets(competitions: List[str]) -> None:
     with c1:
         st.selectbox("🏆 Competition", ["All competitions"] + competitions, key="intl_competition")
     with c2:
-        st.selectbox("📋 Show", ["Upcoming", "Results", "All"], key="intl_status")
+        st.selectbox("📋 Show", ["Upcoming", "Live", "Results", "All"], key="intl_status")
     with c3:
         st.text_input("🔍 Team", placeholder="e.g. South Africa", key="intl_team")
 
@@ -190,6 +191,10 @@ def _apply_filters(matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     upcoming.sort(key=lambda m: m.get("date") or "")
     completed.sort(key=lambda m: m.get("date") or "", reverse=True)
 
+    if status == "Live":
+        # Rank live games by importance (national-team ratings + competition
+        # bonus) — same scoring as the "Top Games" section.
+        return sorted(live, key=match_importance, reverse=True)
     if status == "Upcoming":
         return live + upcoming + other
     if status == "Results":

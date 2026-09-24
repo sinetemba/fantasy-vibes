@@ -68,6 +68,45 @@ def _load_national_rankings() -> Dict[str, float]:
     return _national_rankings_cache
 
 
+# Competition weighting for match importance — competitive international
+# fixtures outrank friendlies at equal team strength; CL/EL get a bonus so
+# club games surface on non-international days.
+_COMP_BONUS = {"CL": 150, "EL": 80, "INTF": 0}
+_DEFAULT_INTL_BONUS = 100
+_leagues_registry_cache: Optional[Dict[str, Any]] = None
+
+
+def _leagues_registry() -> Dict[str, Any]:
+    global _leagues_registry_cache
+    if _leagues_registry_cache is None:
+        try:
+            with open(LEAGUES_PATH, "r", encoding="utf-8") as f:
+                _leagues_registry_cache = json.load(f)
+        except Exception:
+            _leagues_registry_cache = {}
+    return _leagues_registry_cache
+
+
+def match_importance(m: Dict[str, Any]) -> float:
+    """Marquee score for a fixture: combined national-team rating plus a
+    competition bonus. Returns 0 for unrated domestic club games."""
+    ranks = _load_national_rankings()
+    base = (
+        ranks.get(
+            _NATIONAL_ALIASES.get(m.get("home_team", ""), m.get("home_team", "")), 0.0
+        )
+        + ranks.get(
+            _NATIONAL_ALIASES.get(m.get("away_team", ""), m.get("away_team", "")), 0.0
+        )
+    )
+    code = m.get("league_code") or m.get("competition") or ""
+    if code in _COMP_BONUS:
+        return base + _COMP_BONUS[code]
+    if _leagues_registry().get(code, {}).get("group") == "international":
+        return base + _DEFAULT_INTL_BONUS
+    return base
+
+
 def _senior_teams_only(matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [
         m
@@ -289,6 +328,26 @@ class LeagueService:
     def refresh(self):
         """Public helper to reload data and retrain the model."""
         self._refresh()
+
+    def refresh_live_matches(self):
+        """Lightweight refresh of just the match list — standings and the
+        prediction model are untouched. Pairs with utils.bust_live_cache()
+        so the fetch bypasses the HTTP TTL and picks up live scores."""
+        try:
+            matches = self._source.get_matches(self._current_league)
+        except Exception as exc:
+            logger.warning(f"Live match refresh failed: {exc}")
+            return
+        if not matches:
+            return
+        if self._current_league.get("senior_only"):
+            matches = _senior_teams_only(matches)
+        for m in matches:
+            m.setdefault("competition", self._current_code)
+        self.matches = matches
+        self._match_source_name = self._source.last_matches_source
+        self._form_index = None
+        self._group_match_cache.clear()
 
     def get_leagues(self) -> List[Tuple[str, str]]:
         # Grouped leagues (e.g. international competitions) are browsed on

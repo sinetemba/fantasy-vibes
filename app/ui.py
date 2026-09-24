@@ -457,7 +457,7 @@ def create_scoreline_chart(prob_matrix: np.ndarray, max_goals: int = 5) -> go.Fi
 def create_standings_table(rows: List[Dict], zones: Optional[Dict[str, int]] = None) -> str:
     # Zones are per-league counts of top/bottom positions to highlight
     # (e.g. {"qualification": 4, "relegation": 3}). Leagues without a
-    # defined zone scheme — or with none, like MLS — render uncoloured.
+    # defined zone scheme render uncoloured.
     size = len(rows)
     zones = zones or {}
     qual_cutoff = int(zones.get("qualification") or 0)

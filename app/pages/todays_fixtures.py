@@ -20,9 +20,16 @@ from app.ui import (
     probability_bar,
 )
 from src.data import LeagueService
+from src.data.league_service import match_importance
 from src.data.prediction_engine import _norm_key
+from src.data.sources.bbc import BBCSource
+from src.data.sources.composite import CompositeDataSource
+from src.data.sources.fixture_download import FixtureDownloadSource
 from src.data.sources.football_data import FootballDataSource
+from src.data.sources.openfootball import OpenfootballSource
+from src.data.sources.psl_scraper import PSLScraperSource
 from src.data.sources.thesportsdb import TheSportsDBSource
+from src.data.utils import bust_live_cache, sast_now
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +72,7 @@ def _load_leagues() -> Dict[str, Dict[str, Any]]:
 def _load_todays_fixtures(today: str) -> List[Dict[str, Any]]:
     target = date.fromisoformat(today)
     fixtures: List[Dict[str, Any]] = []
+    leagues = _load_leagues()
 
     # TheSportsDB eventsday gives all soccer fixtures for this date (free demo key works).
     try:
@@ -73,16 +81,17 @@ def _load_todays_fixtures(today: str) -> List[Dict[str, Any]]:
             id_to_code = _load_thesportsdb_id_to_code()
             for m in tsdb_matches:
                 tsdb_id = str(m.get("league_code", ""))
-                if tsdb_id in id_to_code:
-                    m["league_code"] = id_to_code[tsdb_id]
-            fixtures.extend(tsdb_matches)
+                if tsdb_id not in id_to_code:
+                    continue  # only configured leagues — eventsday covers everything
+                m["league_code"] = id_to_code[tsdb_id]
+                m["league_name"] = leagues.get(m["league_code"], {}).get("name", "")
+                fixtures.append(m)
     except Exception as exc:
         logger.warning(f"TheSportsDB eventsday failed: {exc}")
 
     # Football-Data.org for configured leagues (often has scheduled fixtures TheSportsDB misses).
     try:
         fd_source = FootballDataSource()
-        leagues = _load_leagues()
         entries = [
             (code, cfg) for code, cfg in leagues.items() if "football_data" in cfg
         ]
@@ -112,6 +121,42 @@ def _load_todays_fixtures(today: str) -> List[Dict[str, Any]]:
                 fixtures.extend(rows)
     except Exception as exc:
         logger.warning(f"Football-Data fixtures failed: {exc}")
+
+    # Pull every configured league through the source cascade so the whole
+    # dropdown is covered — PSL (scraper) and all international competitions
+    # (BBC) that eventsday/Football-Data miss.
+    source = CompositeDataSource(
+        match_sources=[
+            FixtureDownloadSource(),
+            BBCSource(),
+            FootballDataSource(),
+            OpenfootballSource(),
+            PSLScraperSource(),
+            TheSportsDBSource(),
+        ],
+        standings_sources=[],
+    )
+
+    def _league_rows(item):
+        code, cfg = item
+        try:
+            league_matches = source.get_matches(cfg)
+        except Exception as exc:
+            logger.warning(f"{code} fixtures failed: {exc}")
+            return []
+        rows = []
+        for m in league_matches:
+            if _match_date(m) != target:
+                continue
+            row = dict(m)
+            row["league_code"] = code
+            row["league_name"] = cfg.get("name", code)
+            rows.append(row)
+        return rows
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        for rows in pool.map(_league_rows, leagues.items()):
+            fixtures.extend(rows)
 
     if fixtures:
         # Dedupe by a stable key (best-effort across sources). Sources can
@@ -188,13 +233,27 @@ def _predict_all_matches(matches: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def _clear_cache():
+    """Force today's fixtures to refetch: clear the page memoisation and open
+    a live-refresh window so source calls bypass their TTLs. Cache files stay
+    intact — other pages keep their cached data."""
     _load_todays_fixtures.clear()
+    bust_live_cache(30)
+
+
+def _top_games(matches: List[Dict[str, Any]], n: int = 5) -> List[Dict[str, Any]]:
+    """Marquee fixtures for the day, ranked by shared importance scoring
+    (national-team ratings + competition bonus). Only live/scheduled games
+    count, and zero-scoring fixtures are dropped so the section hides on
+    plain domestic slates."""
+    watchable = [m for m in matches if m.get("status") in ("live", "half_time", "scheduled")]
+    ranked = sorted(watchable, key=match_importance, reverse=True)
+    return [m for m in ranked if match_importance(m) > 0][:n]
 
 
 def render(service: LeagueService):
     apply_theme()
 
-    today = date.today()
+    today = sast_now().date()
     with st.spinner("Loading today's fixtures..."):
         matches = _load_todays_fixtures(today.isoformat())
 
@@ -269,11 +328,30 @@ def render(service: LeagueService):
             st.session_state["today_predictions"] = _predict_all_matches(visible_matches)
 
     predictions = st.session_state.get("today_predictions", {})
-    for league_name, league_matches in groupby(visible_matches, key=lambda m: m["league_name"]):
-        league_list = list(league_matches)
-        st.markdown(f"### 🏆 {league_name} ({len(league_list)})")
-        for m in league_list:
+
+    # Marquee fixtures pinned above the full list — on international weeks
+    # this surfaces the strongest national-team matchups; on club nights the
+    # CL/EL bonus keeps European games at the top.
+    top = _top_games(matches)
+    if top:
+        st.markdown("### ⭐ Top Games")
+        for m in top:
             _render_match(m, predictions)
+        st.markdown("---")
+
+    if show_live and not show_played and not show_scheduled:
+        # Live-only view: flat list ranked by importance — same scoring as
+        # the Top Games section (national ratings + competition bonus).
+        ranked_live = sorted(visible_matches, key=match_importance, reverse=True)
+        st.markdown(f"### 🔴 Live Now ({len(ranked_live)})")
+        for m in ranked_live:
+            _render_match(m, predictions)
+    else:
+        for league_name, league_matches in groupby(visible_matches, key=lambda m: m["league_name"]):
+            league_list = list(league_matches)
+            st.markdown(f"### 🏆 {league_name} ({len(league_list)})")
+            for m in league_list:
+                _render_match(m, predictions)
 
     display_disclaimer()
 

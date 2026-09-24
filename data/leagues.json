@@ -134,14 +134,6 @@
     },
     "zones": { "qualification": 8 }
   },
-  "MLS": {
-    "name": "Major League Soccer",
-    "country": "USA",
-    "thesportsdb": {
-      "league_id": "4346",
-      "season": "2026-2027"
-    }
-  },
   "INTF": {
     "name": "International Friendlies",
     "country": "World",
