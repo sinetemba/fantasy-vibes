@@ -348,8 +348,6 @@ class PredictionEngine:
         matrix = [[0.0 for _ in range(max_goals + 1)] for _ in range(max_goals + 1)]
         poisson_home_win = poisson_draw = poisson_away_win = 0.0
         over = under = btts_yes = 0.0
-        best_score = "0-0"
-        max_prob = 0.0
 
         for i in range(max_goals + 1):
             p_i = _poisson_pmf(i, home_exp)
@@ -373,10 +371,6 @@ class PredictionEngine:
                 if i > 0 and j > 0:
                     btts_yes += p
 
-                if p > max_prob:
-                    max_prob = p
-                    best_score = f"{i}-{j}"
-
         # Blend Elo and Poisson win/draw/loss
         home_win = 0.5 * poisson_home_win + 0.5 * elo_home_win
         draw = 0.5 * poisson_draw + 0.5 * draw
@@ -386,6 +380,10 @@ class PredictionEngine:
             home_win /= total
             draw /= total
             away_win /= total
+
+        # Show the likeliest scoreline consistent with the predicted outcome —
+        # the raw modal score is nearly always 1-1 even for lopsided fixtures.
+        best_score, max_prob = self._modal_score(matrix, home_win, draw, away_win)
 
         return {
             "home_team": home_team,
@@ -418,6 +416,24 @@ class PredictionEngine:
             "score_matrix": np.array(matrix),
             "last_trained": self.last_trained,
         }
+
+    @staticmethod
+    def _modal_score(
+        matrix: List[List[float]], home_win: float, draw: float, away_win: float
+    ) -> Tuple[str, float]:
+        """Most likely scoreline consistent with the predicted outcome."""
+        n = len(matrix)
+        if home_win >= draw and home_win >= away_win:
+            cells = ((i, j) for i in range(n) for j in range(n) if i > j)
+        elif away_win >= draw:
+            cells = ((i, j) for i in range(n) for j in range(n) if i < j)
+        else:
+            cells = ((i, j) for i in range(n) for j in range(n) if i == j)
+        best, best_score = 0.0, "1-1"
+        for i, j in cells:
+            if matrix[i][j] > best:
+                best, best_score = matrix[i][j], f"{i}-{j}"
+        return best_score, best
 
     def _describe_inputs(
         self,
@@ -452,16 +468,13 @@ class PredictionEngine:
         home_exp = max(0.5, min(4.0, 2.5 * (home_elo / (home_elo + away_elo)) * 1.1))
         away_exp = max(0.5, min(4.0, 2.5 * (away_elo / (home_elo + away_elo))))
 
-        # Most likely scoreline under independent Poissons — same rule as the
-        # trained path so seeded-elo predictions don't all read 1-1.
-        best_score, max_prob = "1-1", 0.0
-        for i in range(7):
-            p_i = _poisson_pmf(i, home_exp)
-            for j in range(7):
-                p = p_i * _poisson_pmf(j, away_exp)
-                if p > max_prob:
-                    max_prob = p
-                    best_score = f"{i}-{j}"
+        matrix = [
+            [_poisson_pmf(i, home_exp) * _poisson_pmf(j, away_exp) for j in range(7)]
+            for i in range(7)
+        ]
+        best_score, max_prob = self._modal_score(matrix, home_win, draw, away_win)
+        over = sum(matrix[i][j] for i in range(7) for j in range(7) if i + j > 2.5)
+        btts_yes = sum(matrix[i][j] for i in range(1, 7) for j in range(1, 7))
 
         return {
             "home_team": home_team,
@@ -477,14 +490,8 @@ class PredictionEngine:
                 "score": best_score,
                 "probability": round(max_prob, 4),
             },
-            "over_under_2_5": {
-                "over": round(0.5 + (home_exp + away_exp - 2.5) * 0.1, 4),
-                "under": round(0.5 - (home_exp + away_exp - 2.5) * 0.1, 4),
-            },
-            "btts": {
-                "yes": round(1.0 - math.exp(-home_exp) - math.exp(-away_exp) + math.exp(-home_exp - away_exp), 4),
-                "no": 0.0,
-            },
+            "over_under_2_5": {"over": round(over, 4), "under": round(1.0 - over, 4)},
+            "btts": {"yes": round(btts_yes, 4), "no": round(1.0 - btts_yes, 4)},
             "team_attack_params": {"home": 1.0, "away": 1.0},
             "team_defense_params": {"home": 1.0, "away": 1.0},
             "model_inputs": {
@@ -495,7 +502,7 @@ class PredictionEngine:
                          "position": None, "league_size": None, "table_ppg": None,
                          "context_league": None},
             },
-            "score_matrix": np.zeros((7, 7)),
+            "score_matrix": np.array(matrix),
             "last_trained": self.last_trained,
         }
 

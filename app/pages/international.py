@@ -268,4 +268,6 @@ def _render_match(m: Dict[str, Any]):
             st.rerun()
 
     if fixture_id in predictions:
-        _render_prediction_summary(predictions[fixture_id], home, away)
+        _render_prediction_summary(
+            predictions[fixture_id], home, away, service=_service_for(m.get("competition"))
+        )

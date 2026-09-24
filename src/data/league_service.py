@@ -477,20 +477,27 @@ class LeagueService:
         return None
 
     def get_team_form(self, team: str, n: int = 5) -> List[Dict[str, Any]]:
+        """Last-n results for a team, oldest first. Uses current + historical
+        + related-competition matches so national teams get real form."""
+        pool = list(self.matches) + list(self._historical_matches)
+        for data in self._related.values():
+            pool.extend(data["matches"])
+        played = [
+            m
+            for m in pool
+            if m.get("status") == "full_time"
+            and m.get("home_score") is not None
+            and team in (m.get("home_team") or "", m.get("away_team") or "")
+        ]
+        played.sort(key=lambda m: m.get("date") or "")
         form = []
-        for m in reversed(self.matches):
-            if m["status"] != "full_time" or m["home_score"] is None:
-                continue
+        for m in played[-n:]:
             if m["home_team"] == team:
                 gf, ga = m["home_score"], m["away_score"]
-                venue = "H"
-                opponent = m["away_team"]
-            elif m["away_team"] == team:
-                gf, ga = m["away_score"], m["home_score"]
-                venue = "A"
-                opponent = m["home_team"]
+                venue, opponent = "H", m["away_team"]
             else:
-                continue
+                gf, ga = m["away_score"], m["home_score"]
+                venue, opponent = "A", m["home_team"]
             if gf > ga:
                 result = "W"
             elif gf == ga:
@@ -506,9 +513,7 @@ class LeagueService:
                     "score": f"{gf}-{ga}",
                 }
             )
-            if len(form) >= n:
-                break
-        return form[::-1]
+        return form
 
     def get_h2h(self, team_a: str, team_b: str) -> Tuple[Dict[str, int], List[Dict[str, Any]]]:
         record = {"played": 0, "a_wins": 0, "b_wins": 0, "draws": 0, "a_gf": 0, "a_ga": 0}

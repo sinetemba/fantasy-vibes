@@ -32,6 +32,27 @@ def prewarm_league_services(codes: List[str], limit: int = 4) -> None:
     for code in list(codes)[:limit]:
         threading.Thread(target=_warm, args=(code,), daemon=True).start()
 
+
+def form_badges_html(form: List[Dict]) -> str:
+    """Inline W/D/L badges (rightmost = latest) or an N/A placeholder."""
+    if not form:
+        return "<span style='color:#888;font-size:0.8rem;'>N/A</span>"
+    colors = {"W": "#00ff85", "D": "#a0a0a0", "L": "#ff4b4b"}
+    badges = []
+    for m in form:
+        result = m.get("result", "?")
+        title = html.escape(
+            f"{m.get('venue', '')} vs {m.get('opponent', '')} {m.get('score', '')}"
+        )
+        badges.append(
+            f"<span title='{title}' "
+            f"style='display:inline-block;width:1.4rem;height:1.4rem;line-height:1.4rem;"
+            f"text-align:center;border-radius:4px;background:{colors.get(result, '#a0a0a0')}22;"
+            f"color:{colors.get(result, '#a0a0a0')};font-weight:700;margin-right:4px;"
+            f"font-size:0.8rem;'>{result}</span>"
+        )
+    return "".join(badges)
+
 COLORS = {
     "primary": "#37003c",
     "secondary": "#00ff85",

@@ -12,6 +12,7 @@ from app.ui import (
     apply_theme,
     display_disclaimer,
     display_header,
+    form_badges_html,
     probability_bar,
     show_warning_message,
     COLORS,
@@ -212,10 +213,12 @@ def _render_fixture(service: LeagueService, m: Dict[str, Any]):
             st.rerun()
 
     if fixture_id in predictions:
-        _render_prediction_summary(predictions[fixture_id], home, away)
+        _render_prediction_summary(predictions[fixture_id], home, away, service=service)
 
 
-def _render_prediction_summary(pred: Dict[str, Any], home: str, away: str):
+def _render_prediction_summary(
+    pred: Dict[str, Any], home: str, away: str, service: LeagueService = None
+):
     outcome = pred.get("outcome_probabilities", {})
     score = pred.get("predicted_score", {})
     with st.container():
@@ -242,6 +245,15 @@ def _render_prediction_summary(pred: Dict[str, Any], home: str, away: str):
             probability_bar(f"🏠 {home}", home_win, home_color)
             probability_bar("🤝 Draw", draw, COLORS["draw"])
             probability_bar(f"✈️ {away}", away_win, away_color)
+    if service is not None:
+        st.markdown(
+            f"<div style='font-size:0.8rem;color:#a0a0a0;margin-top:0.3rem;'>"
+            f"🏠 Form: {form_badges_html(service.get_team_form(home))}"
+            f"&nbsp;&nbsp;·&nbsp;&nbsp;"
+            f"✈️ Form: {form_badges_html(service.get_team_form(away))}"
+            f"&nbsp;<span style='font-size:0.7rem;'>(latest →)</span></div>",
+            unsafe_allow_html=True,
+        )
     factors = _format_model_inputs(pred, home, away)
     if factors:
         st.caption(factors)

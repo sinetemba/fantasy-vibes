@@ -11,6 +11,7 @@ from app.ui import (
     create_scoreline_chart,
     display_disclaimer,
     display_header,
+    form_badges_html,
     probability_bar,
     show_error_message,
     COLORS,
@@ -49,11 +50,14 @@ def render(service: LeagueService):
     c1, c2 = st.columns(2)
     with c1:
         home = st.selectbox("🏠 Home Team", teams, key="pred_home")
+        _render_form(service.get_team_form(home))
     with c2:
         away_options = [t for t in teams if t != home]
         if st.session_state.get("pred_away") not in away_options:
             st.session_state["pred_away"] = away_options[0] if away_options else None
         away = st.selectbox("✈️ Away Team", away_options, key="pred_away")
+        if away:
+            _render_form(service.get_team_form(away))
 
     neutral = st.checkbox("Neutral venue (no home advantage)", value=False, key="pred_neutral")
 
@@ -69,6 +73,16 @@ def render(service: LeagueService):
 
     st.markdown("---")
     display_disclaimer()
+
+
+def _render_form(form):
+    """Render last-5 form as W/D/L badges (rightmost = most recent)."""
+    st.markdown(
+        f"<div style='margin-top:0.2rem'><span style='color:#a0a0a0;font-size:0.8rem;'>Form&nbsp;</span>"
+        f"{form_badges_html(form)}"
+        f"<span style='color:#a0a0a0;font-size:0.75rem;margin-left:4px;'>latest →</span></div>",
+        unsafe_allow_html=True,
+    )
 
 
 def _display_prediction(pred, service: LeagueService):
