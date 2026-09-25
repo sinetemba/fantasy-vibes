@@ -329,6 +329,16 @@ class LeagueService:
         """Public helper to reload data and retrain the model."""
         self._refresh()
 
+    def refit_model(self):
+        """Retrain the prediction model on the currently loaded match data —
+        used by startup warm-up so predictions reflect the latest results
+        rather than a still-'fresh' model file trained on older data."""
+        try:
+            self._fit_model()
+            self._seed_national_elo()
+        except Exception as exc:
+            logger.warning(f"Model refit failed for {self._current_code}: {exc}")
+
     def refresh_live_matches(self):
         """Lightweight refresh of just the match list — standings and the
         prediction model are untouched. Pairs with utils.bust_live_cache()
@@ -344,10 +354,21 @@ class LeagueService:
             matches = _senior_teams_only(matches)
         for m in matches:
             m.setdefault("competition", self._current_code)
+        prev_ft = {
+            m.get("match_id") for m in self.matches if m.get("status") == "full_time"
+        }
         self.matches = matches
         self._match_source_name = self._source.last_matches_source
         self._form_index = None
         self._group_match_cache.clear()
+        # If games just finished, the model's inputs changed — refit so the
+        # very next prediction reflects the latest results.
+        new_ft = {
+            m.get("match_id") for m in matches if m.get("status") == "full_time"
+        }
+        if new_ft - prev_ft:
+            self._fit_model()
+            self._seed_national_elo()
 
     def get_leagues(self) -> List[Tuple[str, str]]:
         # Grouped leagues (e.g. international competitions) are browsed on

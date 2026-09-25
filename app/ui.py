@@ -33,6 +33,38 @@ def prewarm_league_services(codes: List[str], limit: int = 4) -> None:
         threading.Thread(target=_warm, args=(code,), daemon=True).start()
 
 
+def prewarm_all_services() -> None:
+    """Startup warm-up: pull the latest results for every configured league
+    (dropdown + international group) and refit each prediction model on the
+    fresh data — all on one sequential daemon thread so it never blocks the
+    UI or hammers providers."""
+
+    def _warm():
+        try:
+            from src.data.league_service import _leagues_registry
+            from src.data.utils import bust_live_cache
+
+            # Bypass TTLs while warming so models train on the latest results.
+            bust_live_cache(300)
+            leagues = _leagues_registry()
+            codes = [c for c, cfg in leagues.items() if not cfg.get("group")]
+            codes += [c for c, cfg in leagues.items() if cfg.get("group")]
+            for code in codes:
+                try:
+                    svc = get_league_service(code)
+                    # A cached service may hold stale in-memory matches —
+                    # pull fresh ones before refitting so the model trains
+                    # on the latest results, not just a stale model file.
+                    svc.refresh_live_matches()
+                    svc.refit_model()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    threading.Thread(target=_warm, daemon=True).start()
+
+
 def form_badges_html(form: List[Dict]) -> str:
     """Inline W/D/L badges (rightmost = latest) or an N/A placeholder."""
     if not form:

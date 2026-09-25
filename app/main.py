@@ -18,7 +18,7 @@ try:
 except Exception:
     pass
 
-from app.ui import apply_theme, get_league_service
+from app.ui import apply_theme, get_league_service, prewarm_all_services
 from src.data import LeagueService
 from src.data.league_service import LEAGUES_PATH
 
@@ -87,6 +87,11 @@ def init_session_state():
         teams = st.session_state.league_service.get_teams()
         fav = st.query_params.get("fav") or prefs.get("favourite_team")
         st.session_state.favourite_team = fav if fav in teams else None
+    if "startup_prewarm" not in st.session_state:
+        # Once per session: pull the latest results for every league and refit
+        # prediction models on a daemon thread — never blocks the UI.
+        st.session_state.startup_prewarm = True
+        prewarm_all_services()
 
 
 def _default_league_code() -> str:
