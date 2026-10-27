@@ -14,6 +14,7 @@ from app.ui import (
     form_badges_html,
     probability_bar,
     show_error_message,
+    staleness_note,
     COLORS,
 )
 from src.data import LeagueService
@@ -100,7 +101,7 @@ def _display_prediction(pred, service: LeagueService):
         st.markdown(f"### 🏠 {home}")
         stats = service.get_team_stats(home)
         if stats:
-            st.caption(f"P {stats['played']} · Pts {stats['points']} · GD {stats['goal_difference']:+d}")
+            st.caption(_stats_line(stats))
     with c2:
         st.markdown(
             f"""
@@ -116,7 +117,7 @@ def _display_prediction(pred, service: LeagueService):
         st.markdown(f"### ✈️ {away}")
         stats = service.get_team_stats(away)
         if stats:
-            st.caption(f"P {stats['played']} · Pts {stats['points']} · GD {stats['goal_difference']:+d}")
+            st.caption(_stats_line(stats))
 
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -169,6 +170,10 @@ def _display_prediction(pred, service: LeagueService):
         st.metric(f"{away} attack", f"{attack.get('away', 1.0):.3f}")
         st.metric(f"{away} defense", f"{defense.get('away', 1.0):.3f}")
 
+    note = staleness_note(pred)
+    if note:
+        st.warning(f"Prediction confidence is limited — {note}.")
+
     inputs = pred.get("model_inputs") or {}
     for label, info in ((home, inputs.get("home") or {}), (away, inputs.get("away") or {})):
         bits = []
@@ -184,3 +189,12 @@ def _display_prediction(pred, service: LeagueService):
             st.caption(f"{label}: " + " · ".join(bits))
 
     st.caption(f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+
+def _stats_line(stats) -> str:
+    """One-line P/Pts/GD summary that tolerates partial standings rows."""
+    played = stats.get("played", "—")
+    points = stats.get("points", "—")
+    gd = stats.get("goal_difference")
+    gd_txt = f"{gd:+d}" if isinstance(gd, int) else "—"
+    return f"P {played} · Pts {points} · GD {gd_txt}"

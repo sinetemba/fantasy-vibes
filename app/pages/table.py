@@ -24,11 +24,6 @@ def render(service: LeagueService):
         show_info_message("No standings available for this league. Try another league from the sidebar.")
         return
 
-    df = pd.DataFrame(standings)
-    df = df[
-        ["position", "team", "played", "won", "drawn", "lost", "goals_for", "goals_against", "goal_difference", "points"]
-    ]
-
     table_height = max(180, 80 + len(standings) * 50)
     components.html(
         create_standings_table(standings, zones=service.get_zones()),
@@ -38,6 +33,13 @@ def render(service: LeagueService):
 
     st.markdown("---")
     with st.expander("📋 Raw table data"):
+        cols = [
+            "position", "team", "played", "won", "drawn", "lost",
+            "goals_for", "goals_against", "goal_difference", "points",
+        ]
+        df = pd.DataFrame(standings)
+        # Sources don't all return every column — select what exists.
+        df = df[[c for c in cols if c in df.columns]]
         st.dataframe(df, use_container_width=True, hide_index=True)
 
     st.markdown("---")

@@ -134,6 +134,7 @@ def _change_league():
         # Predictions are league-specific; stale ones cause display errors.
         st.session_state.pop("last_prediction", None)
         st.session_state.pop("fixture_predictions", None)
+        st.session_state.pop("intl_predictions", None)
 
 
 def render_sidebar():

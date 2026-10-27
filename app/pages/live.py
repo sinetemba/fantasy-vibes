@@ -19,9 +19,11 @@ from src.data.utils import bust_live_cache, is_upcoming
 
 def _refresh(service: LeagueService):
     """Public refresh helper for the current league — opens a live-refresh
-    window so the fetch bypasses HTTP TTLs and returns live scores."""
+    window so the fetch bypasses HTTP TTLs and returns live scores. Uses
+    the lightweight match-list refresh; standings/model only refit when
+    new results actually landed."""
     bust_live_cache(30)
-    service.refresh()
+    service.refresh_live_matches()
 
 
 def render(service: LeagueService):
@@ -101,7 +103,7 @@ def _render_match_lists(service: LeagueService):
         display_metric_card("Upcoming", str(len(scheduled)), "")
     with c4:
         total = sum(
-            (m["home_score"] or 0) + (m["away_score"] or 0)
+            (m.get("home_score") or 0) + (m.get("away_score") or 0)
             for m in matches
             if m.get("status") == "full_time"
         )

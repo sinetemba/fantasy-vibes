@@ -11,17 +11,15 @@ from typing import Any, Dict, List, Optional
 import streamlit as st
 
 from app.ui import (
-    COLORS,
     apply_theme,
     display_disclaimer,
     display_header,
     get_league_service,
     match_card_html,
-    probability_bar,
 )
 from src.data import LeagueService
 from src.data.league_service import match_importance
-from src.data.prediction_engine import _norm_key
+from src.data.prediction_engine import fixtures_equivalent
 from src.data.sources.bbc import BBCSource
 from src.data.sources.composite import CompositeDataSource
 from src.data.sources.fixture_download import FixtureDownloadSource
@@ -33,12 +31,27 @@ from src.data.utils import bust_live_cache, sast_now
 
 logger = logging.getLogger(__name__)
 
+# How many fixtures get auto-predictions on first load — each predicted
+# league may need a full service build (fetch + fit), so uncapped
+# auto-prediction can block the page for a long time on a cold cache.
+AUTO_PREDICT_LIMIT = 10
+
 
 def _match_date(m: Dict[str, Any]) -> date:
     try:
         return datetime.fromisoformat(m["date"]).date()
     except Exception:
         return date.min
+
+
+def _dedupe_fixtures(fixtures: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Collapse rows for the same fixture coming from different feeds."""
+    unique: List[Dict[str, Any]] = []
+    for m in fixtures:
+        if any(fixtures_equivalent(m, u) for u in unique):
+            continue
+        unique.append(m)
+    return unique
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -90,6 +103,7 @@ def _load_todays_fixtures(today: str) -> List[Dict[str, Any]]:
         logger.warning(f"TheSportsDB eventsday failed: {exc}")
 
     # Football-Data.org for configured leagues (often has scheduled fixtures TheSportsDB misses).
+    fd_covered = set()
     try:
         fd_source = FootballDataSource()
         entries = [
@@ -107,24 +121,28 @@ def _load_todays_fixtures(today: str) -> List[Dict[str, Any]]:
                 )
             except Exception as exc:
                 logger.warning(f"Football-Data fixtures for {code} failed: {exc}")
-                return []
+                return code, []
             rows = []
             for m in fd_matches:
                 row = dict(m)
                 row["league_code"] = code
                 row["league_name"] = cfg["name"]
                 rows.append(row)
-            return rows
+            return code, rows
 
         with ThreadPoolExecutor(max_workers=min(6, len(entries) or 1)) as pool:
-            for rows in pool.map(_fd_rows, entries):
+            for code, rows in pool.map(_fd_rows, entries):
+                if rows:
+                    fd_covered.add(code)
                 fixtures.extend(rows)
     except Exception as exc:
         logger.warning(f"Football-Data fixtures failed: {exc}")
 
-    # Pull every configured league through the source cascade so the whole
-    # dropdown is covered — PSL (scraper) and all international competitions
-    # (BBC) that eventsday/Football-Data miss.
+    # Pull remaining leagues through the source cascade — PSL (scraper) and
+    # the international competitions (BBC) that eventsday/Football-Data
+    # miss. Leagues whose Football-Data date query already returned today's
+    # fixtures are skipped: the cascade would only re-fetch the same
+    # season feed and re-filter it by date.
     source = CompositeDataSource(
         match_sources=[
             FixtureDownloadSource(),
@@ -154,26 +172,17 @@ def _load_todays_fixtures(today: str) -> List[Dict[str, Any]]:
             rows.append(row)
         return rows
 
+    cascade_entries = [(c, cfg) for c, cfg in leagues.items() if c not in fd_covered]
     with ThreadPoolExecutor(max_workers=6) as pool:
-        for rows in pool.map(_league_rows, leagues.items()):
+        for rows in pool.map(_league_rows, cascade_entries):
             fixtures.extend(rows)
 
     if fixtures:
-        # Dedupe by a stable key (best-effort across sources). Sources can
-        # disagree on kickoff time by minutes and on team-name decoration
-        # ("Manchester United FC" vs "Manchester United"), so normalise
-        # names and compare on the date part only.
-        seen: set = set()
-        unique: List[Dict[str, Any]] = []
-        for m in fixtures:
-            key = (
-                _norm_key(m.get("home_team", "")),
-                _norm_key(m.get("away_team", "")),
-                (m.get("date") or "")[:10],
-            )
-            if key not in seen:
-                seen.add(key)
-                unique.append(m)
+        # Dedupe across sources: feeds disagree on name spelling
+        # ("Man City" vs "Manchester City", "Fenerbahçe" vs "Fenerbahce")
+        # and kickoff can drift by minutes or sit either side of a timezone
+        # midnight, so compare on team equivalence plus a tolerant window.
+        unique = _dedupe_fixtures(fixtures)
         unique.sort(key=lambda m: (m.get("league_name", ""), m.get("date") or ""))
         return unique
 
@@ -193,6 +202,7 @@ def _load_todays_fixtures(today: str) -> List[Dict[str, Any]]:
             row["league_code"] = code
             row["league_name"] = name
             fallback.append(row)
+    fallback = _dedupe_fixtures(fallback)
     fallback.sort(key=lambda m: (m["league_name"], m.get("date") or ""))
     return fallback
 
@@ -266,10 +276,14 @@ def render(service: LeagueService):
     display_header("Today's Fixtures", subtitle)
 
     if not matches:
+        st.info("No fixtures found across the configured leagues for today.")
         return
 
-    if "today_predictions" not in st.session_state:
+    # Predictions are keyed to the date they were generated for — a session
+    # that survives midnight shouldn't show yesterday's predictions.
+    if st.session_state.get("today_predictions_date") != today.isoformat():
         st.session_state["today_predictions"] = {}
+        st.session_state["today_predictions_date"] = today.isoformat()
 
     # Metrics reflect all loaded fixtures.
     live_count = sum(1 for m in matches if m.get("status") == "live")
@@ -277,17 +291,21 @@ def render(service: LeagueService):
     scheduled_count = sum(1 for m in matches if m.get("status") == "scheduled")
 
     cols = st.columns(3)
-    cols[0].metric("Live", live_count)
-    cols[1].metric("Completed", done_count)
-    cols[2].metric("Scheduled", scheduled_count)
-
-    filter_cols = st.columns(3)
-    with filter_cols[0]:
-        show_played = st.toggle("Played", value=True, key="today_show_played")
-    with filter_cols[1]:
-        show_scheduled = st.toggle("Scheduled", value=True, key="today_show_scheduled")
-    with filter_cols[2]:
-        show_live = st.toggle("Live", value=True, key="today_show_live")
+    with cols[0]:
+        st.metric("Live", live_count)
+        show_live = st.toggle(
+            "Live", value=True, key="today_show_live", label_visibility="collapsed"
+        )
+    with cols[1]:
+        st.metric("Completed", done_count)
+        show_played = st.toggle(
+            "Played", value=True, key="today_show_played", label_visibility="collapsed"
+        )
+    with cols[2]:
+        st.metric("Scheduled", scheduled_count)
+        show_scheduled = st.toggle(
+            "Scheduled", value=True, key="today_show_scheduled", label_visibility="collapsed"
+        )
 
     status_groups = {
         "played": ["full_time"],
@@ -322,10 +340,21 @@ def render(service: LeagueService):
                 st.session_state["today_predictions"].update(_predict_all_matches(visible_matches))
             st.rerun()
 
-    # Auto-generate predictions for the currently selected fixtures on first load.
+    # Auto-generate predictions on first load, capped — every distinct
+    # league may trigger a full service build (fetch + model fit), so an
+    # uncapped pass can block the page for a long time on a cold cache.
+    # Marquee fixtures (national ratings + competition bonus) go first.
     if not st.session_state["today_predictions"]:
-        with st.spinner("Generating predictions for selected fixtures..."):
-            st.session_state["today_predictions"] = _predict_all_matches(visible_matches)
+        ranked = sorted(visible_matches, key=match_importance, reverse=True)
+        to_predict = ranked[:AUTO_PREDICT_LIMIT]
+        if to_predict:
+            with st.spinner("Generating predictions for selected fixtures..."):
+                st.session_state["today_predictions"] = _predict_all_matches(to_predict)
+            if len(visible_matches) > len(to_predict):
+                st.caption(
+                    f"Auto-predicted {len(to_predict)} of {len(visible_matches)} "
+                    "fixtures — 'Regenerate Predictions' covers the rest."
+                )
 
     predictions = st.session_state.get("today_predictions", {})
 
@@ -371,6 +400,7 @@ def _render_match(m: Dict[str, Any], predictions: Optional[Dict[str, Any]] = Non
     elif m.get("status") == "live":
         minutes = minutes or "LIVE"
 
+    pred = predictions.get(m.get("match_id")) if predictions else None
     st.markdown(
         match_card_html(
             m["home_team"],
@@ -381,31 +411,8 @@ def _render_match(m: Dict[str, Any], predictions: Optional[Dict[str, Any]] = Non
             str(minutes),
             round_label=m.get("round", ""),
             time=time,
+            venue=m.get("venue") or "",
+            prediction=pred,
         ),
         unsafe_allow_html=True,
     )
-
-    pred = predictions.get(m.get("match_id")) if predictions else None
-    if pred:
-        outcome = pred.get("outcome_probabilities", {})
-        score = pred.get("predicted_score", {})
-        expected = pred.get("expected_goals", {})
-        st.caption(
-            f"Predicted score: **{score.get('score', 'N/A')}**  |  "
-            f"xG: {expected.get('home', 0):.2f} - {expected.get('away', 0):.2f}"
-        )
-        home_win = outcome.get("home_win", 0)
-        away_win = outcome.get("away_win", 0)
-        draw = outcome.get("draw", 0)
-        # Favourite (higher win probability) gets the green bar; underdog the red.
-        if home_win >= away_win:
-            home_color, away_color = COLORS["home_win"], COLORS["away_win"]
-        else:
-            home_color, away_color = COLORS["away_win"], COLORS["home_win"]
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            probability_bar(f"🏠 {m['home_team']}", home_win, home_color)
-        with c2:
-            probability_bar("🤝 Draw", draw, COLORS["draw"])
-        with c3:
-            probability_bar(f"✈️ {m['away_team']}", away_win, away_color)

@@ -83,11 +83,12 @@ class TheSportsDBSource(DataSource):
 
             if status == "full_time":
                 try:
-                    home_score = int(home_score) if home_score is not None else 0
-                    away_score = int(away_score) if away_score is not None else 0
+                    home_score = int(home_score)
+                    away_score = int(away_score)
                 except (ValueError, TypeError):
-                    home_score = 0
-                    away_score = 0
+                    # FT with a missing/unparseable score is a data gap,
+                    # not a 0-0 — skip rather than fabricate a result.
+                    continue
             else:
                 home_score = None
                 away_score = None
@@ -151,11 +152,12 @@ class TheSportsDBSource(DataSource):
             away_score = e.get("intAwayScore")
             if status == "full_time":
                 try:
-                    home_score = int(home_score) if home_score is not None else 0
-                    away_score = int(away_score) if away_score is not None else 0
+                    home_score = int(home_score)
+                    away_score = int(away_score)
                 except (ValueError, TypeError):
-                    home_score = 0
-                    away_score = 0
+                    # FT with a missing/unparseable score is a data gap,
+                    # not a 0-0 — skip rather than fabricate a result.
+                    continue
             else:
                 home_score = None
                 away_score = None

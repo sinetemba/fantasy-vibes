@@ -15,6 +15,7 @@ from app.ui import (
     form_badges_html,
     probability_bar,
     show_warning_message,
+    staleness_note,
     COLORS,
 )
 from src.data import LeagueService
@@ -113,10 +114,11 @@ def _render_filters(matches: List[Dict[str, Any]], service: LeagueService):
             predictions = st.session_state["fixture_predictions"]
             all_scheduled = [m for m in filtered if m.get("status") == "scheduled"]
             to_predict = all_scheduled[:MAX_BATCH_PREDICTIONS]
-            for m in to_predict:
-                pred = service.predict(m["home_team"], m["away_team"])
-                pred["predicted_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                predictions[m["match_id"]] = pred
+            with st.spinner(f"Predicting {len(to_predict)} fixtures..."):
+                for m in to_predict:
+                    pred = service.predict(m["home_team"], m["away_team"])
+                    pred["predicted_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    predictions[m["match_id"]] = pred
             msg = f"Predicted {len(to_predict)} displayed matches"
             if len(all_scheduled) > MAX_BATCH_PREDICTIONS:
                 msg += f" (capped at {MAX_BATCH_PREDICTIONS})"
@@ -262,6 +264,9 @@ def _render_prediction_summary(
     factors = _format_model_inputs(pred, home, away)
     if factors:
         st.caption(factors)
+    note = staleness_note(pred)
+    if note:
+        st.caption(f"⚠️ Low-confidence prediction — {note}")
     if pred.get("predicted_at"):
         st.caption(f"Predicted on {pred['predicted_at']}")
 

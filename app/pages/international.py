@@ -44,6 +44,12 @@ def _service_for(code: str) -> LeagueService:
     return get_league_service(code)
 
 
+def _predictable(m: Dict[str, Any]) -> bool:
+    """Only scheduled fixtures with a resolvable competition get predicted —
+    postponed/cancelled/live/finished games are excluded."""
+    return m.get("status") == "scheduled" and bool(m.get("competition"))
+
+
 def render(service: LeagueService):
     apply_theme()
     display_header("International", "Friendlies & qualifiers across confederations")
@@ -95,7 +101,7 @@ def render(service: LeagueService):
         pending = sum(
             1
             for m in filtered
-            if m.get("status") != "full_time"
+            if _predictable(m)
             and m["match_id"] not in st.session_state["intl_predictions"]
         )
         st.caption(f"{len(filtered)} matches · {pending} awaiting prediction")
@@ -209,9 +215,7 @@ def _predict_all(matches: List[Dict[str, Any]]) -> None:
     pending = [
         m
         for m in matches
-        if m.get("status") != "full_time"
-        and m["match_id"] not in predictions
-        and m.get("competition")
+        if _predictable(m) and m["match_id"] not in predictions
     ]
     if not pending:
         return
@@ -266,7 +270,9 @@ def _render_match(m: Dict[str, Any]):
     with c_action:
         if m.get("status") == "full_time":
             st.caption("Completed")
-        elif st.button("🔮 Predict", key=f"intl_predict_{fixture_id}", use_container_width=True):
+        elif _predictable(m) and st.button(
+            "🔮 Predict", key=f"intl_predict_{fixture_id}", use_container_width=True
+        ):
             with st.spinner("Loading prediction model..."):
                 comp_service = _service_for(m.get("competition"))
                 pred = comp_service.predict(home, away)
@@ -275,6 +281,10 @@ def _render_match(m: Dict[str, Any]):
             st.rerun()
 
     if fixture_id in predictions:
+        try:
+            comp_service = _service_for(m["competition"]) if m.get("competition") else None
+        except Exception:
+            comp_service = None
         _render_prediction_summary(
-            predictions[fixture_id], home, away, service=_service_for(m.get("competition"))
+            predictions[fixture_id], home, away, service=comp_service
         )

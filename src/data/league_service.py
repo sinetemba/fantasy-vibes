@@ -3,14 +3,20 @@
 import difflib
 import json
 import logging
+import math
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Set
 
-from .prediction_engine import PredictionEngine
+from .prediction_engine import (
+    PredictionEngine,
+    _norm_key,
+    _TEAM_KEY_ALIASES,
+    fixtures_equivalent,
+)
 from .utils import compute_table
 from .sources.bbc import BBCSource
 from .sources.composite import CompositeDataSource
@@ -28,6 +34,10 @@ MODEL_CACHE_DIR = PROJECT_ROOT / "data" / "cache"
 MODEL_TTL = 1800  # seconds
 GROUP_CACHE_TTL = 300  # seconds — group pages refetch at most this often
 NATIONAL_RANKINGS_PATH = PROJECT_ROOT / "data" / "national_rankings.json"
+TEAM_VALUES_PATH = PROJECT_ROOT / "data" / "team_values.json"
+# Elo points per natural-log unit of squad market value above/below the
+# file's geometric mean — a club worth 2.7x the median starts ~+90.
+VALUE_ELO_PER_LN = 90.0
 
 # Matches youth/reserve/women's sides in international feeds,
 # e.g. "Portugal U17", "Germany U21", "England Women".
@@ -50,6 +60,7 @@ _NATIONAL_ALIASES = {
 }
 
 _national_rankings_cache: Optional[Dict[str, float]] = None
+_team_values_cache: Optional[Dict[str, float]] = None
 
 
 def _load_national_rankings() -> Dict[str, float]:
@@ -66,6 +77,22 @@ def _load_national_rankings() -> Dict[str, float]:
         except Exception as exc:
             logger.warning(f"Could not load national rankings: {exc}")
     return _national_rankings_cache
+
+
+def _load_team_values() -> Dict[str, float]:
+    """Squad market values (EUR millions) used to seed Elo for clubs."""
+    global _team_values_cache
+    if _team_values_cache is None:
+        _team_values_cache = {}
+        try:
+            with open(TEAM_VALUES_PATH, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            for k, v in raw.items():
+                if not k.startswith("_") and isinstance(v, (int, float)):
+                    _team_values_cache[k] = float(v)
+        except Exception as exc:
+            logger.warning(f"Could not load team values: {exc}")
+    return _team_values_cache
 
 
 # Competition weighting for match importance — competitive international
@@ -105,6 +132,33 @@ def match_importance(m: Dict[str, Any]) -> float:
     if _leagues_registry().get(code, {}).get("group") == "international":
         return base + _DEFAULT_INTL_BONUS
     return base
+
+
+def _dedupe_matches(matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Drop duplicate rows for the same fixture coming from different feeds
+    (current + historical + related pools overlap). Buckets candidates by
+    match day ±1 so fixtures_equivalent only compares near neighbours —
+    O(n) per bucket instead of O(n²) over the whole pool."""
+    by_day: Dict[str, List[Dict[str, Any]]] = {}
+    undated: List[Dict[str, Any]] = []
+    unique: List[Dict[str, Any]] = []
+    for m in sorted(matches, key=lambda x: x.get("date") or ""):
+        day = (m.get("date") or "")[:10]
+        candidates: List[Dict[str, Any]] = list(undated)
+        if day:
+            try:
+                d = date.fromisoformat(day)
+                for delta in (-1, 0, 1):
+                    candidates.extend(
+                        by_day.get((d + timedelta(days=delta)).isoformat(), [])
+                    )
+            except ValueError:
+                candidates = unique
+        if any(fixtures_equivalent(m, u) for u in candidates):
+            continue
+        unique.append(m)
+        (by_day.setdefault(day, []) if day else undated).append(m)
+    return unique
 
 
 def _senior_teams_only(matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -363,12 +417,57 @@ class LeagueService:
         self._group_match_cache.clear()
         # If games just finished, the model's inputs changed — refit so the
         # very next prediction reflects the latest results.
-        new_ft = {
-            m.get("match_id") for m in matches if m.get("status") == "full_time"
-        }
-        if new_ft - prev_ft:
+        new_results = [
+            m
+            for m in matches
+            if m.get("status") == "full_time"
+            and m.get("match_id")
+            and m.get("match_id") not in prev_ft
+        ]
+        if new_results:
+            # Positions/PPG move when results land — patch the table and
+            # rebuild contexts before refitting so predict() sees them.
+            self._apply_results_to_standings(new_results)
+            self._team_contexts = self._build_team_contexts()
             self._fit_model()
             self._seed_national_elo()
+
+    def _apply_results_to_standings(self, results: List[Dict[str, Any]]) -> None:
+        """Patch the loaded standings in place with just-finished results —
+        cheaper and safer than recomputing the table, which would lose data
+        for leagues whose provider table covers more than the match window."""
+        if not self.standings:
+            return
+        by_team = {_norm_key(r.get("team", "")): r for r in self.standings}
+        touched = False
+        for m in results:
+            hs, aws = m.get("home_score"), m.get("away_score")
+            h = by_team.get(_norm_key(m.get("home_team", "")))
+            a = by_team.get(_norm_key(m.get("away_team", "")))
+            if h is None or a is None or hs is None or aws is None:
+                continue
+            h_pts, a_pts = (3, 0) if hs > aws else ((1, 1) if hs == aws else (0, 3))
+            for row, gf, ga, pts in ((h, hs, aws, h_pts), (a, aws, hs, a_pts)):
+                row["played"] = (row.get("played") or 0) + 1
+                row["won"] = (row.get("won") or 0) + (1 if gf > ga else 0)
+                row["drawn"] = (row.get("drawn") or 0) + (1 if gf == ga else 0)
+                row["lost"] = (row.get("lost") or 0) + (1 if gf < ga else 0)
+                row["goals_for"] = (row.get("goals_for") or 0) + gf
+                row["goals_against"] = (row.get("goals_against") or 0) + ga
+                row["goal_difference"] = (row.get("goal_difference") or 0) + gf - ga
+                row["points"] = (row.get("points") or 0) + pts
+            touched = True
+        if touched:
+            self.standings.sort(
+                key=lambda r: (
+                    -(r.get("points") or 0),
+                    -(r.get("goal_difference") or 0),
+                    -(r.get("goals_for") or 0),
+                    r.get("team", ""),
+                )
+            )
+            for i, row in enumerate(self.standings, 1):
+                row["position"] = i
 
     def get_leagues(self) -> List[Tuple[str, str]]:
         # Grouped leagues (e.g. international competitions) are browsed on
@@ -472,17 +571,13 @@ class LeagueService:
         # via different feeds (e.g. a qualifiers feed listing a Nations
         # League game). INTF is the catch-all friendlies bucket, so on a
         # collision the more specific competition's entry wins.
-        seen: Dict[Tuple[str, str, str], int] = {}
         unique: List[Dict[str, Any]] = []
         for m in matches:
-            key = (
-                (m.get("home_team") or "").strip().lower(),
-                (m.get("away_team") or "").strip().lower(),
-                (m.get("date") or "")[:10],
+            prev = next(
+                (i for i, u in enumerate(unique) if fixtures_equivalent(u, m)),
+                None,
             )
-            prev = seen.get(key)
             if prev is None:
-                seen[key] = len(unique)
                 unique.append(m)
             elif unique[prev].get("competition") == "INTF" and m.get("competition") != "INTF":
                 unique[prev] = m
@@ -552,7 +647,7 @@ class LeagueService:
                 pool.extend(data["matches"])
             played = [
                 m
-                for m in pool
+                for m in _dedupe_matches(pool)
                 if m.get("status") == "full_time" and m.get("home_score") is not None
             ]
             played.sort(key=lambda m: m.get("date") or "")
@@ -670,6 +765,26 @@ class LeagueService:
                 seed[feed_name] = ranks[rank_name]
         return seed
 
+    def _team_value_seed(self) -> Dict[str, float]:
+        """Elo priors from squad market values — only for club leagues.
+        Log-scaled so the ~100x spread between a super-club and a minnow
+        maps to a few hundred Elo points around the pool mean."""
+        if not self._current_league or self._current_league.get("group") == "international":
+            return {}
+        values = _load_team_values()
+        if not values:
+            return {}
+        ref = math.exp(sum(math.log(v) for v in values.values()) / len(values))
+        return {
+            name: 1500.0 + VALUE_ELO_PER_LN * (math.log(v) - math.log(ref))
+            for name, v in values.items()
+        }
+
+    def _elo_seed(self) -> Dict[str, float]:
+        """Combined starting-Elo priors; national rankings win where both
+        apply (club values are meaningless for international pools)."""
+        return {**self._team_value_seed(), **self._national_seed()}
+
     def _load_or_fit_model(self) -> None:
         if self._model_is_fresh():
             try:
@@ -682,12 +797,18 @@ class LeagueService:
         self._seed_national_elo()
 
     def _seed_national_elo(self) -> None:
-        """Merge ranking priors into the engine's Elo table. Trained values
-        win where they exist; seeded ratings make the fallback path useful
-        for national teams with no completed-match history."""
-        seed = self._national_seed()
+        """Merge ranking/value priors into the engine's Elo table. Trained
+        values win where they exist; seeded ratings make the fallback path
+        useful for teams with no completed-match history."""
+        seed = self._elo_seed()
         if seed:
             self._engine.elo = {**seed, **self._engine.elo}
+            self._engine.elo_prior.update(
+                {
+                    _TEAM_KEY_ALIASES.get(_norm_key(k), _norm_key(k)): float(v)
+                    for k, v in seed.items()
+                }
+            )
 
     def _fit_model(self) -> None:
         """Train the prediction engine on current + historical matches."""
@@ -698,7 +819,11 @@ class LeagueService:
         for data in self._related.values():
             training.extend(data["matches"])
         self._engine = PredictionEngine()
-        self._engine.fit(training, initial_elo=self._national_seed())
+        self._engine.fit(
+            training,
+            initial_elo=self._elo_seed(),
+            primary_competition=self._current_code,
+        )
         self._save_model()
 
     def predict(self, home_team: str, away_team: str, neutral: bool = False) -> Dict[str, Any]:

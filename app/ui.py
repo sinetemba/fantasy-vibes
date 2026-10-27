@@ -2,6 +2,7 @@
 
 import html
 import threading
+from datetime import datetime
 from textwrap import dedent
 from typing import Dict, List, Optional
 
@@ -63,6 +64,33 @@ def prewarm_all_services() -> None:
             pass
 
     threading.Thread(target=_warm, daemon=True).start()
+
+
+# A model whose newest training result is older than this is likely stale
+# (e.g. a feed that stopped updating for a competition).
+STALE_DATA_DAYS = 21
+# Below this many training matches a prediction is mostly prior-driven.
+LOW_DATA_MATCHES = 60
+
+
+def staleness_note(pred: Dict) -> str:
+    """Short 'low confidence' note when a prediction's underlying model data
+    is stale or thin. Empty string when the data is fresh or unknown."""
+    bits = []
+    raw = pred.get("data_as_of")
+    if raw:
+        try:
+            as_of = datetime.fromisoformat(raw)
+            now = datetime.now(as_of.tzinfo) if as_of.tzinfo else datetime.now()
+            age = (now - as_of).days
+            if age > STALE_DATA_DAYS:
+                bits.append(f"results only through {as_of.date()} ({age}d old)")
+        except Exception:
+            pass
+    used = pred.get("matches_used") or 0
+    if used and used < LOW_DATA_MATCHES:
+        bits.append(f"only {used} matches")
+    return " · ".join(bits)
 
 
 def form_badges_html(form: List[Dict]) -> str:
@@ -387,19 +415,25 @@ def show_error_message(message: str):
     st.markdown(f'<div class="error-box">❌ {safe_html(message)}</div>', unsafe_allow_html=True)
 
 
-def probability_bar(label: str, probability: float, color: str, max_width: int = 100):
+def _prob_bar_html(label: str, probability: float, color: str, max_width: int = 100) -> str:
     probability = max(0.0, min(1.0, float(probability or 0)))
     pct = probability * 100
     width = max(5, min(pct, max_width))
-    st.markdown(
+    return dedent(
         f"""
-        <div class="prob-bar-container">
+        <div class="prob-bar-container" style="flex:1;">
             <div class="prob-bar-label">{safe_html(label)}</div>
             <div class="prob-bar" style="width: {width}%; background-color: {color};">
                 {pct:.1f}%
             </div>
         </div>
-        """,
+        """
+    ).strip()
+
+
+def probability_bar(label: str, probability: float, color: str, max_width: int = 100):
+    st.markdown(
+        _prob_bar_html(label, probability, color, max_width),
         unsafe_allow_html=True,
     )
 
@@ -562,6 +596,8 @@ def match_card_html(
     minutes: str,
     round_label: str = "",
     time: str = "",
+    venue: str = "",
+    prediction: Optional[Dict] = None,
 ) -> str:
     score = (
         f"{home_score} - {away_score}"
@@ -577,6 +613,46 @@ def match_card_html(
         "cancelled": "#7f8c8d",
     }.get(status, "#3498db")
     status_label = minutes or status.replace("_", " ").upper()
+
+    extras = ""
+    if prediction:
+        pred_score = (prediction.get("predicted_score") or {}).get("score", "N/A")
+        expected = prediction.get("expected_goals") or {}
+        outcome = prediction.get("outcome_probabilities") or {}
+        home_win = outcome.get("home_win", 0)
+        away_win = outcome.get("away_win", 0)
+        draw = outcome.get("draw", 0)
+        # Favourite (higher win probability) gets the green bar; underdog the red.
+        if home_win >= away_win:
+            home_color, away_color = COLORS["home_win"], COLORS["away_win"]
+        else:
+            home_color, away_color = COLORS["away_win"], COLORS["home_win"]
+        extras += dedent(
+            f"""
+            <div style="font-size:0.85rem; color:#a0a0a0; text-align:center; margin-top:0.5rem;">
+                Predicted score: <b>{safe_html(pred_score)}</b> &nbsp;|&nbsp;
+                xG: {expected.get('home', 0):.2f} - {expected.get('away', 0):.2f}
+            </div>
+            """
+        ).strip()
+    if venue:
+        extras += dedent(
+            f"""
+            <div style="font-size:0.8rem; color:#a0a0a0; text-align:center; margin-top:0.25rem;">
+                📍 {safe_html(venue)}
+            </div>
+            """
+        ).strip()
+    if prediction:
+        extras += dedent(
+            f"""
+            <div style="display:flex; gap:1rem; margin-top:0.5rem;">
+                {_prob_bar_html(f"🏠 {home_team}", home_win, home_color)}
+                {_prob_bar_html("🤝 Draw", draw, COLORS["draw"])}
+                {_prob_bar_html(f"✈️ {away_team}", away_win, away_color)}
+            </div>
+            """
+        ).strip()
 
     return dedent(
         f"""
@@ -595,6 +671,7 @@ def match_card_html(
                 </div>
                 <div style="flex:1; text-align:left; font-weight:700; font-size:1.1rem;">{safe_html(away_team)}</div>
             </div>
+            {extras}
         </div>
         """
     ).strip()

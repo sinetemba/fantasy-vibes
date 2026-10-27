@@ -11,6 +11,7 @@ from app.ui import (
     display_metric_card,
     match_card_html,
     show_info_message,
+    staleness_note,
 )
 from src.data import LeagueService
 from src.data.utils import is_upcoming
@@ -145,17 +146,20 @@ def render(service: LeagueService):
         if st.button("🔮 Predict", type="primary", use_container_width=True):
             pred = service.predict(home, away)
             st.session_state["last_prediction"] = pred
-            st.session_state["prediction_home"] = home
-            st.session_state["prediction_away"] = away
 
         if "last_prediction" in st.session_state:
             pred = st.session_state["last_prediction"]
+            # Label metrics with the predicted teams, not the current
+            # selectbox values — they can drift after a selection change.
             outcome = pred.get("outcome_probabilities", {})
             c1, c2, c3 = st.columns(3)
             score = pred.get("predicted_score", {})
-            c1.metric(f"🏠 {home}", f"{outcome.get('home_win', 0)*100:.1f}%")
+            c1.metric(f"🏠 {pred.get('home_team', home)}", f"{outcome.get('home_win', 0)*100:.1f}%")
             c2.metric("🤝 Draw", f"{outcome.get('draw', 0)*100:.1f}%", score.get("score", "—"))
-            c3.metric(f"✈️ {away}", f"{outcome.get('away_win', 0)*100:.1f}%")
+            c3.metric(f"✈️ {pred.get('away_team', away)}", f"{outcome.get('away_win', 0)*100:.1f}%")
+            note = staleness_note(pred)
+            if note:
+                st.caption(f"⚠️ Low-confidence prediction — {note}")
 
     # Featured next fixture
     st.markdown("---")

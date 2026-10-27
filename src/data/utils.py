@@ -194,10 +194,14 @@ def cached_get(
 
 
 def clear_cache() -> int:
-    """Remove all cached JSON files. Returns number removed."""
+    """Remove cached HTTP responses. Returns number removed. Only hashed
+    URL-cache files are touched — persisted models, the retrain report and
+    preferences live in the same directory and must survive."""
     removed = 0
     for f in CACHE_DIR.glob("*.json"):
         try:
+            if not _PRUNABLE.match(f.name):
+                continue
             f.unlink()
             removed += 1
         except Exception:

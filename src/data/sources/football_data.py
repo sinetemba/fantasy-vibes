@@ -104,9 +104,10 @@ class FootballDataSource(DataSource):
             ft = score.get("fullTime") or {}
             home_score = ft.get("home")
             away_score = ft.get("away")
-            if status == "full_time" and home_score is None:
-                home_score = 0
-                away_score = 0
+            if status == "full_time" and (home_score is None or away_score is None):
+                # FINISHED/AWARDED with no score is a data gap, not a 0-0 —
+                # fabricating one would corrupt every downstream rating.
+                continue
 
             utc_date = m.get("utcDate")
             dt = None
