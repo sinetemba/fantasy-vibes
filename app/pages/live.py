@@ -120,7 +120,12 @@ def _render_match(m):
     if m.get("date"):
         try:
             dt = datetime.fromisoformat(m["date"])
-            time = dt.strftime("%H:%M")
+            if m.get("status") == "scheduled":
+                time = dt.strftime("%a, %d %b · %H:%M")
+            elif m.get("status") == "full_time":
+                time = dt.strftime("%a, %d %b")
+            else:
+                time = dt.strftime("%H:%M")
         except Exception:
             pass
     if m.get("time_confirmed") is False:
