@@ -9,3 +9,8 @@ __pycache__/
 .vscode/
 .idea/
 data/cache/*.json
+
+# Script output redirected to the repo root (backtest/tune/retrain runs)
+/bt_*.txt
+/retrain_*.txt
+/tune_*.txt

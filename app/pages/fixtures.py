@@ -6,6 +6,7 @@ from typing import Any, Dict, List
 
 MAX_BATCH_PREDICTIONS = 20
 FIXTURES_PAGE_SIZE = 30
+VIEWS = ["Upcoming", "This week", "Results", "All"]
 
 import streamlit as st
 
@@ -18,7 +19,7 @@ from app.ui import (
     show_warning_message,
 )
 from src.data import LeagueService
-from src.data.utils import sast_now
+from src.data.utils import is_upcoming, sast_now
 
 
 def _parse_date(m: Dict[str, Any]) -> date:
@@ -54,9 +55,7 @@ def render(service: LeagueService):
         st.session_state.get("fixtures_round"),
         st.session_state.get("fixtures_use_date"),
         str(st.session_state.get("fixtures_date")),
-        st.session_state.get("fixtures_this_week"),
-        st.session_state.get("fixtures_show_all_upcoming"),
-        st.session_state.get("fixtures_show_completed"),
+        st.session_state.get("fixtures_view"),
     )
     if st.session_state.get("fixtures_page_sig") != signature:
         st.session_state["fixtures_page_sig"] = signature
@@ -95,7 +94,13 @@ def _render_filters(matches: List[Dict[str, Any]], service: LeagueService):
     rounds = sorted({m.get("round", "") for m in matches if m.get("round")})
     dates = sorted({_parse_date(m) for m in matches if m.get("date")})
 
-    c1, c2, c3 = st.columns([2, 2, 1])
+    # One "Show" choice instead of overlapping checkboxes; round and date
+    # narrow whichever view is picked.
+    st.segmented_control(
+        "Show", VIEWS, default=VIEWS[0], key="fixtures_view"
+    )
+
+    c1, c2 = st.columns(2)
     with c1:
         options = ["All rounds"] + rounds
         if "fixtures_round" in st.session_state and st.session_state["fixtures_round"] not in options:
@@ -124,14 +129,10 @@ def _render_filters(matches: List[Dict[str, Any]], service: LeagueService):
                 key="fixtures_date",
                 label_visibility="collapsed",
             )
-    with c3:
-        st.checkbox("🗓️ This week's fixtures", value=False, key="fixtures_this_week")
-        st.checkbox("🔮 Show all upcoming", value=False, key="fixtures_show_all_upcoming")
-        st.checkbox("🕓 Show completed", value=False, key="fixtures_show_completed")
 
     filtered = _apply_filters(matches)
 
-    if filtered:
+    if any(m.get("status") == "scheduled" for m in filtered):
         if st.button(f"🔮 Predict first {MAX_BATCH_PREDICTIONS} scheduled", type="primary", use_container_width=True):
             predictions = st.session_state["fixture_predictions"]
             all_scheduled = [m for m in filtered if m.get("status") == "scheduled"]
@@ -155,28 +156,15 @@ def _render_filters(matches: List[Dict[str, Any]], service: LeagueService):
 
 
 def _apply_filters(matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    # Deselecting the segmented control yields None — treat as the default.
+    view = st.session_state.get("fixtures_view") or VIEWS[0]
     round_filter = st.session_state.get("fixtures_round", "All rounds")
     use_date = st.session_state.get("fixtures_use_date", False)
     date_filter = st.session_state.get("fixtures_date") if use_date else None
-    show_completed = st.session_state.get("fixtures_show_completed", False)
-    show_all_upcoming = st.session_state.get("fixtures_show_all_upcoming", False)
-    this_week = st.session_state.get("fixtures_this_week", False)
 
     filtered = matches
     if round_filter != "All rounds":
         filtered = [m for m in filtered if m.get("round") == round_filter]
-
-    if this_week:
-        # Everything in the 7-day window starting today, regardless of status.
-        start = sast_now().date()
-        end = start + timedelta(days=6)
-        filtered = [
-            m for m in filtered
-            if m.get("date") and start <= _parse_date(m) <= end
-        ]
-        filtered.sort(key=lambda m: m.get("date") or "")
-        return filtered
-
     if date_filter:
         try:
             d = date_filter if isinstance(date_filter, date) else date_filter.date()
@@ -184,23 +172,31 @@ def _apply_filters(matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         except Exception:
             pass
 
-    if show_all_upcoming:
-        upcoming = [m for m in filtered if m.get("status") == "scheduled"]
-        upcoming.sort(key=lambda m: m.get("date") or "")
-        return upcoming
+    by_date = lambda m: m.get("date") or ""
+    if view == "This week":
+        # Everything in the 7-day window starting today, any status.
+        start = sast_now().date()
+        end = start + timedelta(days=6)
+        return sorted(
+            (m for m in filtered if m.get("date") and start <= _parse_date(m) <= end),
+            key=by_date,
+        )
+    if view == "Results":
+        return sorted(
+            (m for m in filtered if m.get("status") == "full_time"), key=by_date, reverse=True
+        )
+    if view == "All":
+        return sorted(filtered, key=by_date)
 
-    upcoming = [m for m in filtered if m.get("status") == "scheduled"]
-    completed = [m for m in filtered if m.get("status") == "full_time"]
-    other = [m for m in filtered if m.get("status") not in ("scheduled", "full_time")]
-
-    upcoming.sort(key=lambda m: m.get("date") or "")
-    completed.sort(key=lambda m: m.get("date") or "", reverse=True)
-    other.sort(key=lambda m: m.get("date") or "")
-
-    result = upcoming + other
-    if show_completed:
-        result = completed + result
-    return result
+    # Upcoming: in-play first, then future fixtures, then postponed etc.
+    # Past-dated "scheduled" rows are stale feed entries, not upcoming.
+    live = [m for m in filtered if m.get("status") in ("live", "half_time")]
+    upcoming = [m for m in filtered if is_upcoming(m)]
+    other = [
+        m for m in filtered
+        if m.get("status") not in ("scheduled", "full_time", "live", "half_time")
+    ]
+    return sorted(live, key=by_date) + sorted(upcoming, key=by_date) + sorted(other, key=by_date)
 
 
 def _render_fixture(service: LeagueService, m: Dict[str, Any]):

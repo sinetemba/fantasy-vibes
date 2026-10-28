@@ -3,6 +3,7 @@
 import json
 import logging
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict
 
@@ -70,7 +71,7 @@ def _save_preferences():
             json.dump(
                 {
                     "last_league": st.session_state.get("last_league"),
-                    "favourite_team": st.session_state.get("favourite_team"),
+                    "favourite_teams": st.session_state.get("favourite_teams", {}),
                 },
                 f,
                 indent=2,
@@ -91,11 +92,18 @@ def init_session_state():
         st.session_state.current_page = "Home"
     if "last_league" not in st.session_state:
         st.session_state.last_league = st.session_state.league_service.get_current_code()
-    if "favourite_team" not in st.session_state:
+    if "favourite_teams" not in st.session_state:
+        # One favourite per league code. Older preference files hold a
+        # single "favourite_team", which belongs to their last league.
         prefs = _load_preferences()
-        teams = st.session_state.league_service.get_teams()
-        fav = st.query_params.get("fav") or prefs.get("favourite_team")
-        st.session_state.favourite_team = fav if fav in teams else None
+        favs = dict(prefs.get("favourite_teams") or {})
+        if prefs.get("favourite_team") and prefs.get("last_league"):
+            favs.setdefault(prefs["last_league"], prefs["favourite_team"])
+        service = st.session_state.league_service
+        fav = st.query_params.get("fav")
+        if fav and fav in service.get_teams():
+            favs[service.get_current_code()] = fav
+        st.session_state.favourite_teams = favs
     # Starts the shared warm-up/refresh thread on first call in the process;
     # every later call (any session) is a no-op.
     prewarm_all_services()
@@ -145,6 +153,27 @@ def _change_league():
         st.session_state.pop("intl_predictions", None)
 
 
+def _change_favourite(code: str):
+    team = st.session_state.get(f"fav_select_{code}")
+    favs = st.session_state.favourite_teams
+    if team:
+        favs[code] = team
+    else:
+        favs.pop(code, None)
+    _save_preferences()
+
+
+def _updated_ago(ts) -> str:
+    if not ts:
+        return "not loaded yet"
+    secs = max(0, time.time() - ts)
+    if secs < 60:
+        return "just now"
+    if secs < 3600:
+        return f"{int(secs // 60)} min ago"
+    return f"{int(secs // 3600)} h ago"
+
+
 def render_sidebar():
     service: LeagueService = st.session_state.league_service
 
@@ -184,6 +213,23 @@ def render_sidebar():
             on_change=_change_league,
         )
 
+        # Favourite team for the current league — Home shows its form, next
+        # match and a one-click prediction.
+        if not on_intl:
+            code = service.get_current_code()
+            teams = service.get_teams()
+            current = st.session_state.favourite_teams.get(code)
+            fav_options = [None] + teams
+            st.selectbox(
+                "⭐ Favourite team",
+                options=fav_options,
+                index=fav_options.index(current) if current in teams else 0,
+                format_func=lambda t: "— none —" if t is None else t,
+                key=f"fav_select_{code}",
+                on_change=_change_favourite,
+                args=(code,),
+            )
+
         st.markdown("---")
 
         # Navigation
@@ -202,21 +248,8 @@ def render_sidebar():
 
         st.markdown("---")
 
-        # Data source status
-        sources = service.get_data_sources()
-        st.markdown("##### 📡 Data Sources")
-        for key, val in sources.items():
-            color = "#00ff85" if val else "#e74c3c"
-            label = val or "none"
-            st.markdown(
-                f"""
-                <div style="display:flex; justify-content:space-between; font-size:0.8rem; margin:0.2rem 0;">
-                    <span style="color:#a0a0a0;">{key.title()}</span>
-                    <span style="color:{color}; font-weight:700;">{label}</span>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+        # Freshness, not provider names — those are listed on the About page.
+        st.caption(f"🕒 Data updated {_updated_ago(getattr(service, 'last_refreshed', None))}")
 
         st.markdown("---")
         st.caption(

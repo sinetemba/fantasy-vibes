@@ -216,6 +216,8 @@ class LeagueService:
         self._form_index: Optional[Dict[str, List[Dict[str, Any]]]] = None
         self.standings: List[Dict[str, Any]] = []
         self._match_source_name = None
+        # Wall-clock time of the last successful data swap, for freshness UI.
+        self.last_refreshed: Optional[float] = None
         self._standings_source_name = None
         self._engine = PredictionEngine()
         # Services are shared across sessions and threads. Writers (warm-up,
@@ -298,6 +300,7 @@ class LeagueService:
             self._team_contexts = contexts
             self._form_index = None
             self._group_match_cache.clear()
+            self.last_refreshed = time.time()
 
     def _fetch_historical(self, match_source: Optional[str]) -> List[Dict[str, Any]]:
         """Pull configured historical/archived seasons as extra training data."""
@@ -510,6 +513,7 @@ class LeagueService:
             self._team_contexts = contexts
             self._form_index = None
             self._group_match_cache.clear()
+            self.last_refreshed = time.time()
 
     def _apply_results_to_standings(
         self, standings: List[Dict[str, Any]], results: List[Dict[str, Any]]

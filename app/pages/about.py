@@ -46,6 +46,15 @@ def render(service: LeagueService):
     """
     )
 
+    if service is not None:
+        sources = service.get_data_sources()
+        st.markdown("### 📡 Active data sources")
+        st.caption(
+            f"Current league ({service.get_current_name()}): matches from "
+            f"**{sources.get('matches') or 'none'}**, table from "
+            f"**{sources.get('standings') or 'none'}**."
+        )
+
     _render_track_record()
 
     st.markdown("---")

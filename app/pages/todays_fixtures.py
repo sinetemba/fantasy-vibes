@@ -35,6 +35,13 @@ logger = logging.getLogger(__name__)
 # auto-prediction can block the page for a long time on a cold cache.
 AUTO_PREDICT_LIMIT = 10
 
+STATUS_GROUPS = {
+    "live": ["live", "half_time"],
+    "played": ["full_time"],
+    "scheduled": ["scheduled", "postponed", "cancelled"],
+}
+STATUS_LABELS = {"live": "🔴 Live", "played": "✅ Completed", "scheduled": "📅 Scheduled"}
+
 
 def _match_date(m: Dict[str, Any]) -> date:
     try:
@@ -283,42 +290,23 @@ def render(service: LeagueService):
         st.session_state["today_predictions"] = {}
         st.session_state["today_predictions_date"] = today.isoformat()
 
-    # Metrics reflect all loaded fixtures.
-    live_count = sum(1 for m in matches if m.get("status") == "live")
-    done_count = sum(1 for m in matches if m.get("status") == "full_time")
-    scheduled_count = sum(1 for m in matches if m.get("status") == "scheduled")
-
-    cols = st.columns(3)
-    with cols[0]:
-        st.metric("Live", live_count)
-        show_live = st.toggle(
-            "Live", value=True, key="today_show_live", label_visibility="collapsed"
-        )
-    with cols[1]:
-        st.metric("Completed", done_count)
-        show_played = st.toggle(
-            "Played", value=True, key="today_show_played", label_visibility="collapsed"
-        )
-    with cols[2]:
-        st.metric("Scheduled", scheduled_count)
-        show_scheduled = st.toggle(
-            "Scheduled", value=True, key="today_show_scheduled", label_visibility="collapsed"
-        )
-
-    status_groups = {
-        "played": ["full_time"],
-        "live": ["live", "half_time"],
-        "scheduled": ["scheduled", "postponed", "cancelled"],
+    # One labelled multi-select with per-status counts (counted over all of
+    # today's fixtures) instead of unlabelled toggles under metrics.
+    counts = {
+        group: sum(1 for m in matches if m.get("status") in statuses)
+        for group, statuses in STATUS_GROUPS.items()
     }
-    visible_matches = [
-        m
-        for m in matches
-        if (
-            (m.get("status") in status_groups["played"] and show_played)
-            or (m.get("status") in status_groups["live"] and show_live)
-            or (m.get("status") in status_groups["scheduled"] and show_scheduled)
-        )
-    ]
+    shown = st.pills(
+        "Show",
+        list(STATUS_GROUPS),
+        selection_mode="multi",
+        default=list(STATUS_GROUPS),
+        format_func=lambda g: f"{STATUS_LABELS[g]} ({counts[g]})",
+        key="today_status",
+    ) or []
+    visible_statuses = {s for g in shown for s in STATUS_GROUPS[g]}
+    visible_matches = [m for m in matches if m.get("status") in visible_statuses]
+    live_only = shown == ["live"]
 
     if not visible_matches:
         st.info("No fixtures match the selected filters.")
@@ -366,7 +354,7 @@ def render(service: LeagueService):
             _render_match(m, predictions)
         st.markdown("---")
 
-    if show_live and not show_played and not show_scheduled:
+    if live_only:
         # Live-only view: flat list ranked by importance — same scoring as
         # the Top Games section (national ratings + competition bonus).
         ranked_live = sorted(visible_matches, key=match_importance, reverse=True)

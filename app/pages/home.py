@@ -114,10 +114,15 @@ def render(service: LeagueService):
     st.markdown("---")
 
     # Favourite team watchlist
-    favourite = st.session_state.get("favourite_team")
+    favourite = st.session_state.get("favourite_teams", {}).get(service.get_current_code())
     if favourite and favourite in service.get_teams():
         _render_favourite_team(service, favourite)
         st.markdown("---")
+    else:
+        st.caption(
+            "⭐ Tip: pick a favourite team in the sidebar to see its form "
+            "and next match here."
+        )
 
     # Top teams mini-table
     if standings:
