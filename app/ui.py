@@ -505,13 +505,14 @@ def create_scoreline_chart(prob_matrix: np.ndarray, max_goals: int = 5) -> go.Fi
             text=text,
             texttemplate="%{text}",
             textfont=dict(size=10, color="black"),
-            hovertemplate="Home: %{x} goals<br>Away: %{y} goals<br>Prob: %{z:.2f}%<extra></extra>",
+            # Rows of the matrix are home goals, and Plotly maps rows to y.
+            hovertemplate="Home: %{y} goals<br>Away: %{x} goals<br>Prob: %{z:.2f}%<extra></extra>",
         )
     )
     fig.update_layout(
         title="Scoreline Probability Matrix (%)",
-        xaxis_title="Home Goals",
-        yaxis_title="Away Goals",
+        xaxis_title="Away Goals",
+        yaxis_title="Home Goals",
         height=400,
         margin=dict(l=50, r=20, t=50, b=50),
         paper_bgcolor="rgba(0,0,0,0)",

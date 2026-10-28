@@ -18,6 +18,7 @@ from app.ui import (
 )
 from src.data import LeagueService
 from src.data.league_service import match_importance
+from src.data.utils import sast_now
 
 GROUP = "international"
 MAX_RENDERED = 150
@@ -139,7 +140,7 @@ def _render_filter_widgets(competitions: List[str]) -> None:
         if st.session_state.get("intl_use_date"):
             st.date_input(
                 "Date",
-                value=date.today(),
+                value=sast_now().date(),
                 key="intl_date",
                 label_visibility="collapsed",
             )
@@ -165,7 +166,7 @@ def _apply_filters(matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         ]
 
     if this_week:
-        start = date.today()
+        start = sast_now().date()
         end = start + timedelta(days=6)
         filtered = [
             m
@@ -184,7 +185,7 @@ def _apply_filters(matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
     # "Scheduled" matches dated in the past are stale feed entries with no
     # recorded score — don't present them as upcoming.
-    today = date.today()
+    today = sast_now().date()
     upcoming = [
         m
         for m in filtered

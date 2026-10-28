@@ -19,6 +19,7 @@ from app.ui import (
     COLORS,
 )
 from src.data import LeagueService
+from src.data.utils import sast_now
 
 
 def _parse_date(m: Dict[str, Any]) -> date:
@@ -82,7 +83,7 @@ def _render_filters(matches: List[Dict[str, Any]], service: LeagueService):
     with c2:
         st.checkbox("📅 Filter by date", value=False, key="fixtures_use_date")
         if dates and st.session_state.get("fixtures_use_date"):
-            today = date.today()
+            today = sast_now().date()
             default_date = today
             min_value = min(today, dates[0])
             max_value = max(today, dates[-1])
@@ -146,7 +147,7 @@ def _apply_filters(matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
     if this_week:
         # Everything in the 7-day window starting today, regardless of status.
-        start = date.today()
+        start = sast_now().date()
         end = start + timedelta(days=6)
         filtered = [
             m for m in filtered

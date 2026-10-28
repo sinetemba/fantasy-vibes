@@ -137,7 +137,7 @@ def _render_match(m):
             m.get("home_score"),
             m.get("away_score"),
             m.get("status", "scheduled"),
-            m.get("minutes_elapsed", "TBD"),
+            m.get("minutes_elapsed") or "",
             round_label=m.get("round", ""),
             time=time,
         ),

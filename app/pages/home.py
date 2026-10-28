@@ -61,7 +61,7 @@ def _render_favourite_team(service: LeagueService, team: str):
                 next_match.get("home_score"),
                 next_match.get("away_score"),
                 next_match.get("status", "scheduled"),
-                next_match.get("minutes_elapsed", "TBD"),
+                next_match.get("minutes_elapsed") or "",
                 round_label=next_match.get("round", ""),
                 time=kickoff,
             ),
@@ -145,18 +145,20 @@ def render(service: LeagueService):
 
         if st.button("🔮 Predict", type="primary", use_container_width=True):
             pred = service.predict(home, away)
-            st.session_state["last_prediction"] = pred
+            # Own key — the Predictions page renders "last_prediction".
+            st.session_state["quick_prediction"] = pred
 
-        if "last_prediction" in st.session_state:
-            pred = st.session_state["last_prediction"]
+        if "quick_prediction" in st.session_state:
+            pred = st.session_state["quick_prediction"]
             # Label metrics with the predicted teams, not the current
             # selectbox values — they can drift after a selection change.
             outcome = pred.get("outcome_probabilities", {})
             c1, c2, c3 = st.columns(3)
             score = pred.get("predicted_score", {})
             c1.metric(f"🏠 {pred.get('home_team', home)}", f"{outcome.get('home_win', 0)*100:.1f}%")
-            c2.metric("🤝 Draw", f"{outcome.get('draw', 0)*100:.1f}%", score.get("score", "—"))
+            c2.metric("🤝 Draw", f"{outcome.get('draw', 0)*100:.1f}%")
             c3.metric(f"✈️ {pred.get('away_team', away)}", f"{outcome.get('away_win', 0)*100:.1f}%")
+            st.caption(f"Most likely score: **{score.get('score', '—')}**")
             note = staleness_note(pred)
             if note:
                 st.caption(f"⚠️ Low-confidence prediction — {note}")
@@ -179,7 +181,7 @@ def render(service: LeagueService):
                 next_match.get("home_score"),
                 next_match.get("away_score"),
                 next_match.get("status", "scheduled"),
-                next_match.get("minutes_elapsed", "TBD"),
+                next_match.get("minutes_elapsed") or "",
                 round_label=next_match.get("round", ""),
                 time=fixture_time,
             ),

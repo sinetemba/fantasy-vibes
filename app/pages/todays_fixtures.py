@@ -394,7 +394,7 @@ def _render_match(m: Dict[str, Any], predictions: Optional[Dict[str, Any]] = Non
         except Exception:
             pass
 
-    minutes = m.get("minutes_elapsed", "TBD")
+    minutes = m.get("minutes_elapsed") or ""
     if m.get("status") == "full_time":
         minutes = "FT"
     elif m.get("status") == "live":
