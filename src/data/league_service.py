@@ -18,7 +18,8 @@ from .prediction_engine import (
     _TEAM_KEY_ALIASES,
     fixtures_equivalent,
 )
-from .utils import compute_table
+from . import prediction_log
+from .utils import compute_table, sast_now
 from .sources.bbc import BBCSource
 from .sources.composite import CompositeDataSource
 from .sources.fixture_download import FixtureDownloadSource
@@ -922,6 +923,34 @@ class LeagueService:
         return engine.predict(
             home, away, neutral, competition=self._current_code, contexts=contexts
         )
+
+    def predict_fixture(self, match: Dict[str, Any], neutral: bool = False) -> Dict[str, Any]:
+        """Predict a fixture row and log it so its accuracy is scored once
+        the result lands."""
+        pred = self.predict(match["home_team"], match["away_team"], neutral=neutral)
+        prediction_log.record(self._current_code, [(match, pred)])
+        return pred
+
+    def track_predictions(self, horizon_days: int = 7) -> None:
+        """Score logged predictions whose results are in, then log fresh
+        predictions for every fixture kicking off within `horizon_days` —
+        so accuracy covers the whole slate, not just what users clicked."""
+        matches = self.matches
+        prediction_log.settle(self._current_code, matches)
+        now = sast_now()
+        limit = now + timedelta(days=horizon_days)
+        pairs = []
+        for m in matches:
+            if m.get("status") != "scheduled" or not m.get("match_id"):
+                continue
+            kickoff = prediction_log.kickoff_sast(m.get("date"))
+            if not kickoff or not (now < kickoff <= limit):
+                continue
+            try:
+                pairs.append((m, self.predict(m["home_team"], m["away_team"])))
+            except Exception as exc:
+                logger.warning(f"Tracking prediction failed for {m.get('match_id')}: {exc}")
+        prediction_log.record(self._current_code, pairs)
 
     def _training_size(self) -> int:
         related = sum(len(d["matches"]) for d in self._related.values())

@@ -283,6 +283,61 @@ class TestPredictionEngine(unittest.TestCase):
             pred["expected_goals"]["home"], pred["expected_goals"]["away"]
         )
 
+    @staticmethod
+    def _equal_strength_league():
+        """Double round-robin of identical teams scoring a fixed 2-1 at
+        home — any team-level skew in predictions is a model artefact."""
+        teams = [f"Team {c}" for c in "ABCDEF"]
+        matches = []
+        day = 0
+        for _ in range(2):
+            for home in teams:
+                for away in teams:
+                    if home == away:
+                        continue
+                    day += 1
+                    matches.append({
+                        "status": "full_time", "home_team": home, "away_team": away,
+                        "home_score": 2, "away_score": 1, "competition": "L",
+                        "date": f"2026-{1 + day // 28:02d}-{1 + day % 28:02d}T15:00:00",
+                    })
+        return matches
+
+    def test_home_advantage_not_double_counted(self):
+        # The venue baselines already carry home advantage; expected goals
+        # must match them, not be inflated by the home factor again.
+        engine = PredictionEngine()
+        engine.fit(self._equal_strength_league(), primary_competition="L")
+        pred = engine.predict("Team A", "Team B", competition="L")
+        self.assertAlmostEqual(pred["expected_goals"]["home"], 2.0, delta=0.1)
+        self.assertAlmostEqual(pred["expected_goals"]["away"], 1.0, delta=0.1)
+
+    def test_neutral_venue_is_symmetric(self):
+        # At a neutral venue the listed "home" side gets no edge, so swapping
+        # the sides must swap the numbers.
+        engine = PredictionEngine()
+        engine.fit(self._equal_strength_league(), primary_competition="L")
+        ab = engine.predict("Team A", "Team B", neutral=True, competition="L")
+        ba = engine.predict("Team B", "Team A", neutral=True, competition="L")
+        self.assertAlmostEqual(ab["expected_goals"]["home"], ba["expected_goals"]["away"], delta=0.05)
+        self.assertAlmostEqual(ab["expected_goals"]["away"], ba["expected_goals"]["home"], delta=0.05)
+        self.assertAlmostEqual(
+            ab["outcome_probabilities"]["home_win"],
+            ba["outcome_probabilities"]["away_win"],
+            delta=0.02,
+        )
+
+    def test_ambiguous_prefix_names_stay_separate(self):
+        engine = PredictionEngine()
+        names = engine._canonical_map(
+            ["Inter", "Inter Miami", "Internazionale", "Real", "Real Madrid",
+             "Real Betis", "Tottenham", "Tottenham Hotspur"]
+        )
+        self.assertNotEqual(names["Inter Miami"], names["Inter"])
+        self.assertEqual(names["Internazionale"], names["Inter"])
+        self.assertNotEqual(names["Real Madrid"], names["Real Betis"])
+        self.assertEqual(names["Tottenham Hotspur"], names["Tottenham"])
+
 
 if __name__ == "__main__":
     unittest.main()

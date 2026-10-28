@@ -386,15 +386,7 @@ class PredictionEngine:
         if dup.any():
             df = df.loc[~dup]
 
-        self.teams = set(df["home_team"].unique()) | set(df["away_team"].unique())
-
-        # Recency weighting: more recent matches count more. _fit_core
-        # recomputes it relative to each walk-forward cut date.
-        latest = df["date"].max()
-        df["days_ago"] = (latest - df["date"]).dt.days.astype(float)
-        df["weight"] = np.exp(-np.log(2) / RECENCY_HALF_LIFE_DAYS * df["days_ago"])
-        df["weight"] = df["weight"].clip(lower=0.01)
-
+        # _fit_core sets the team set and recency weights itself.
         self._fit_core(df)
 
         self.fitted = True
@@ -505,7 +497,7 @@ class PredictionEngine:
         away_defense = pd.Series(1.0, index=teams_idx)
 
         # Contribution semantics mirror predict(): home expected goals are
-        # avg_h * home_attack[h] * away_defense[a] * ha, so each match's
+        # avg_h * home_attack[h] * away_defense[a], so each match's
         # contribution to a rating is the normalised score divided by the
         # opposing rating it was scored against.
         lo, hi = OPPONENT_RATING_CLIP
@@ -553,18 +545,27 @@ class PredictionEngine:
         counts = Counter(names)
         key_to_names: Dict[str, List[str]] = {}
         for name in counts:
-            key_to_names.setdefault(_norm_key(name), []).append(name)
+            key = _norm_key(name)
+            key_to_names.setdefault(_TEAM_KEY_ALIASES.get(key, key), []).append(name)
 
         # Merge keys where one is a token-prefix of the other
-        # (e.g. "tottenham" and "tottenham hotspur").
+        # (e.g. "tottenham" and "tottenham hotspur") — but only when the
+        # short key extends to a single longer one. A bare "inter" or
+        # "real" prefixing several clubs is ambiguous and stays separate.
         keys = sorted(key_to_names, key=len)
+        extensions = Counter(
+            shorter
+            for key in keys
+            for shorter in keys
+            if len(shorter) < len(key) and key.startswith(shorter + " ")
+        )
         merged: Dict[str, str] = {}
         for key in keys:
             target = key
             for shorter in keys:
                 if len(shorter) >= len(key):
                     break
-                if key.startswith(shorter + " "):
+                if key.startswith(shorter + " ") and extensions[shorter] == 1:
                     target = merged.get(shorter, shorter)
                     break
             merged[key] = target
@@ -744,21 +745,23 @@ class PredictionEngine:
         away_attack = self.away_attack.get(away_team, 1.0) * away_factor
         away_defense = self.away_defense.get(away_team, 1.0) / away_factor
 
-        ha = 1.0 if neutral else self.home_advantage
-        ah = 1.0 / ha
-
         # Convert competition-normalised ratings to the target
-        # competition's scoring baseline.
+        # competition's scoring baseline. The venue-specific ratings were
+        # fitted against the home/away baselines, which already contain
+        # home advantage — so none is applied on top. A neutral venue scores
+        # both sides off the geometric mean of the two baselines instead.
         avg_h, avg_a = self.comp_avg.get(
             str(competition), (self.league_avg_home, self.league_avg_away)
         )
+        if neutral:
+            avg_h = avg_a = math.sqrt(avg_h * avg_a)
         home_exp = max(
             0.1,
-            min(MAX_EXPECTED_GOALS, avg_h * home_attack * away_defense * ha),
+            min(MAX_EXPECTED_GOALS, avg_h * home_attack * away_defense),
         )
         away_exp = max(
             0.1,
-            min(MAX_EXPECTED_GOALS, avg_a * away_attack * home_defense * ah),
+            min(MAX_EXPECTED_GOALS, avg_a * away_attack * home_defense),
         )
 
         # Elo-based outcome probabilities

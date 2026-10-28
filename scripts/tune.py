@@ -5,7 +5,7 @@ tunable constant re-runs the same walk-forward evaluation used by
 backtest.py and ranks by mean log-loss (with Brier/hit-rate for context).
 
 Usage:
-    .venv\\Scripts\\python.exe scripts\\tune.py [--last 20] [--leagues PL,BL1,...]
+    .venv\\Scripts\\python.exe scripts\\tune.py [--last 150] [--leagues PL,BL1,...]
 """
 
 import argparse
@@ -142,7 +142,7 @@ def evaluate(leagues):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--last", type=int, default=20)
+    ap.add_argument("--last", type=int, default=150)  # see backtest.py
     ap.add_argument("--leagues", type=str, default="")
     ap.add_argument("--full", action="store_true",
                     help="Also try pairwise combos of the per-knob winners")

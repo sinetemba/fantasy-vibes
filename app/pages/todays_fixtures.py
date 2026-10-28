@@ -220,7 +220,7 @@ def _predict_all_matches(matches: List[Dict[str, Any]]) -> Dict[str, Any]:
             continue
         try:
             svc = _league_service_for(code)
-            pred = svc.predict(m["home_team"], m["away_team"])
+            pred = svc.predict_fixture(m)
             predictions[m["match_id"]] = pred
         except ValueError as exc:
             if "Unknown league code" not in str(exc):

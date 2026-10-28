@@ -5,7 +5,7 @@ predicts the last N completed fixtures using only results dated before each
 fixture — mirroring how the deployed model refits as results land.
 
 Usage:
-    .venv\\Scripts\\python.exe scripts\\backtest.py [--last 15] [--leagues PL,BL1]
+    .venv\\Scripts\\python.exe scripts\\backtest.py [--last 150] [--leagues PL,BL1]
 
 Reports per-league and overall:
     hit rate (argmax outcome), log-loss, Brier score,
@@ -153,7 +153,9 @@ def summarize(rows):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--last", type=int, default=15, help="recent results per league to score")
+    # ~150 per league (1,000+ pooled) — smaller holdouts are too noisy
+    # to tell parameter changes apart.
+    ap.add_argument("--last", type=int, default=150, help="recent results per league to score")
     ap.add_argument("--leagues", type=str, default="", help="comma-separated league codes")
     ap.add_argument("--splits", type=int, default=1,
                     help="split the holdout chronologically into N blocks "

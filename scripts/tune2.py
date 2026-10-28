@@ -48,7 +48,7 @@ CONFIGS = {
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--last", type=int, default=20)
+    ap.add_argument("--last", type=int, default=150)  # see backtest.py
     ap.add_argument("--leagues", type=str,
                     default="PL,BL1,SA,PD,FL1,PSL,CL,EL,INTF,UNL,WCQUEFA,GCQ")
     args = ap.parse_args()

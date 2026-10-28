@@ -87,6 +87,9 @@ def _refresh_loop() -> None:
                         svc.refit_model()
                     else:
                         svc.refresh(refit=True)
+                    # Score finished fixtures and log the coming week's
+                    # predictions for the accuracy report.
+                    svc.track_predictions()
                 except Exception as exc:
                     logger.warning(f"Background refresh failed for {code}: {exc}")
         except Exception as exc:
@@ -272,7 +275,7 @@ def outcome_bar_html(pred: Dict, home: Optional[str] = None, away: Optional[str]
     )
 
 
-def _league_name(code: Optional[str]) -> Optional[str]:
+def league_name(code: Optional[str]) -> Optional[str]:
     if not code:
         return code
     from src.data.league_service import _leagues_registry
@@ -290,12 +293,12 @@ def prediction_reasons(pred: Dict, home: Optional[str] = None, away: Optional[st
         parts = []
         pos, league = info.get("position"), info.get("context_league")
         if pos and league:
-            parts.append(f"{_ordinal(int(pos))} in {_league_name(league)}")
+            parts.append(f"{_ordinal(int(pos))} in {league_name(league)}")
         if info.get("form_ppg") is not None:
             parts.append(f"{info['form_ppg']:.1f} pts/game (last 10)")
         comp_ppg, comp = info.get("comp_form_ppg"), info.get("competition")
         if comp_ppg is not None and comp and comp != league:
-            parts.append(f"{comp_ppg:.1f} pts/game in {_league_name(comp)}")
+            parts.append(f"{comp_ppg:.1f} pts/game in {league_name(comp)}")
         return f"{team} " + ", ".join(parts) if parts else ""
 
     bits = [b for b in (_fmt(home, inputs.get("home") or {}), _fmt(away, inputs.get("away") or {})) if b]

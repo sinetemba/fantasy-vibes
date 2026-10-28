@@ -225,9 +225,7 @@ def _predict_all(matches: List[Dict[str, Any]]) -> None:
     total = len(pending)
     for i, m in enumerate(pending):
         try:
-            pred = _service_for(m["competition"]).predict(
-                m["home_team"], m["away_team"]
-            )
+            pred = _service_for(m["competition"]).predict_fixture(m)
             pred["predicted_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             predictions[m["match_id"]] = pred
         except Exception as exc:
@@ -276,7 +274,7 @@ def _render_match(m: Dict[str, Any]):
         ):
             with st.spinner("Loading prediction model..."):
                 comp_service = _service_for(m.get("competition"))
-                pred = comp_service.predict(home, away)
+                pred = comp_service.predict_fixture(m)
             pred["predicted_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             predictions[fixture_id] = pred
             st.rerun()

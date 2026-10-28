@@ -138,7 +138,7 @@ def _render_filters(matches: List[Dict[str, Any]], service: LeagueService):
             to_predict = all_scheduled[:MAX_BATCH_PREDICTIONS]
             with st.spinner(f"Predicting {len(to_predict)} fixtures..."):
                 for m in to_predict:
-                    pred = service.predict(m["home_team"], m["away_team"])
+                    pred = service.predict_fixture(m)
                     pred["predicted_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     predictions[m["match_id"]] = pred
             msg = f"Predicted {len(to_predict)} displayed matches"
@@ -236,7 +236,7 @@ def _render_fixture(service: LeagueService, m: Dict[str, Any]):
         if m.get("status") == "full_time":
             st.caption("Completed")
         elif st.button("🔮 Predict", key=f"predict_{fixture_id}", use_container_width=True):
-            pred = service.predict(home, away)
+            pred = service.predict_fixture(m)
             pred["predicted_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             predictions[fixture_id] = pred
             st.rerun()
