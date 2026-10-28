@@ -9,7 +9,6 @@ from textwrap import dedent
 from typing import Dict, List, Optional
 
 import numpy as np
-import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
@@ -158,13 +157,208 @@ def form_badges_html(form: List[Dict]) -> str:
         )
     return "".join(badges)
 
+
+# Outcome colours mean one thing everywhere: which result (home / draw /
+# away), never favourite vs underdog. Blue vs orange stays distinct under
+# the common colour-vision deficiencies, where green vs red does not, and
+# every segment is also labelled so colour is never the only cue.
+OUTCOME_COLORS = {"home": "#3b8fd9", "draw": "#8a8f98", "away": "#f39c34"}
+
+# Verdict thresholds on the gap between the two likeliest outcomes.
+VERDICT_COIN_FLIP_GAP = 0.05
+VERDICT_SLIGHT_GAP = 0.15
+VERDICT_STRONG_GAP = 0.30
+
+
+def _whole_percents(*probs: float) -> List[int]:
+    """Probabilities as whole percents that still sum to 100 (largest
+    remainder), so a bar never reads 48% + 26% + 27%."""
+    raw = [max(0.0, float(p or 0)) * 100 for p in probs]
+    total = sum(raw) or 1.0
+    raw = [r * 100 / total for r in raw]
+    floors = [int(r) for r in raw]
+    order = sorted(range(len(raw)), key=lambda i: raw[i] - floors[i], reverse=True)
+    for i in order[: 100 - sum(floors)]:
+        floors[i] += 1
+    return floors
+
+
+def _ordinal(n: int) -> str:
+    if 10 <= n % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+def _team_labels(pred: Dict, home: Optional[str], away: Optional[str]):
+    return home or pred.get("home_team", "Home"), away or pred.get("away_team", "Away")
+
+
+def prediction_verdict(pred: Dict, home: Optional[str] = None, away: Optional[str] = None) -> str:
+    """Plain-language headline, e.g. 'Arsenal slight favourites' or
+    'Coin flip', from the gap between the two likeliest outcomes."""
+    home, away = _team_labels(pred, home, away)
+    outcome = pred.get("outcome_probabilities") or {}
+    ranked = sorted(
+        (
+            (outcome.get("home_win", 0), home),
+            (outcome.get("draw", 0), None),
+            (outcome.get("away_win", 0), away),
+        ),
+        key=lambda x: x[0],
+        reverse=True,
+    )
+    (top, team), (second, _) = ranked[0], ranked[1]
+    gap = top - second
+    if gap < VERDICT_COIN_FLIP_GAP:
+        return "Coin flip"
+    if team is None:
+        return "Draw the likeliest result"
+    if gap < VERDICT_SLIGHT_GAP:
+        return f"{team} slight favourites"
+    if gap < VERDICT_STRONG_GAP:
+        return f"{team} favourites"
+    return f"{team} strong favourites"
+
+
+def top_scorelines(pred: Dict, n: int = 3) -> List[tuple]:
+    """The n likeliest exact scores as ("1-0", probability) pairs."""
+    matrix = pred.get("score_matrix")
+    if matrix is None:
+        score = pred.get("predicted_score") or {}
+        return [(score["score"], score.get("probability", 0))] if score.get("score") else []
+    m = np.asarray(matrix)
+    cells = sorted(
+        ((float(m[i][j]), f"{i}-{j}") for i in range(m.shape[0]) for j in range(m.shape[1])),
+        reverse=True,
+    )
+    return [(score, p) for p, score in cells[:n]]
+
+
+def scorelines_text(pred: Dict, n: int = 3) -> str:
+    """'Most likely scores: 1-1 (12%) · 1-0 (11%) · 2-1 (9%)'."""
+    scores = top_scorelines(pred, n)
+    if not scores:
+        return ""
+    label = "Most likely score" if len(scores) == 1 else "Most likely scores"
+    return f"{label}: " + " · ".join(f"{s} ({p * 100:.0f}%)" for s, p in scores)
+
+
+def outcome_bar_html(pred: Dict, home: Optional[str] = None, away: Optional[str] = None) -> str:
+    """One stacked home/draw/away bar with a labelled legend line, e.g.
+    'Arsenal 48% · Draw 26% · Chelsea 26%'."""
+    home, away = _team_labels(pred, home, away)
+    outcome = pred.get("outcome_probabilities") or {}
+    pcts = _whole_percents(
+        outcome.get("home_win", 0), outcome.get("draw", 0), outcome.get("away_win", 0)
+    )
+    parts = list(zip((home, "Draw", away), pcts, ("home", "draw", "away")))
+    legend = " · ".join(
+        f"<span style='color:{OUTCOME_COLORS[key]};'>■</span> "
+        f"{safe_html(label)} <b>{pct}%</b>"
+        for label, pct, key in parts
+    )
+    segments = "".join(
+        f"<div title='{safe_html(label)} {pct}%' style='width:{pct}%;"
+        f"background:{OUTCOME_COLORS[key]};'></div>"
+        for label, pct, key in parts
+        if pct
+    )
+    return (
+        f"<div style='font-size:0.9rem;margin:0.35rem 0 0.25rem;'>{legend}</div>"
+        f"<div style='display:flex;height:12px;border-radius:6px;overflow:hidden;"
+        f"gap:2px;background:#2c3e50;'>{segments}</div>"
+    )
+
+
+def _league_name(code: Optional[str]) -> Optional[str]:
+    if not code:
+        return code
+    from src.data.league_service import _leagues_registry
+
+    return _leagues_registry().get(code, {}).get("name", code)
+
+
+def prediction_reasons(pred: Dict, home: Optional[str] = None, away: Optional[str] = None) -> str:
+    """'Why: Arsenal 2nd in Premier League, 2.3 pts/game (last 10); …' —
+    the table-position and form inputs behind the prediction."""
+    home, away = _team_labels(pred, home, away)
+    inputs = pred.get("model_inputs") or {}
+
+    def _fmt(team: str, info: Dict) -> str:
+        parts = []
+        pos, league = info.get("position"), info.get("context_league")
+        if pos and league:
+            parts.append(f"{_ordinal(int(pos))} in {_league_name(league)}")
+        if info.get("form_ppg") is not None:
+            parts.append(f"{info['form_ppg']:.1f} pts/game (last 10)")
+        comp_ppg, comp = info.get("comp_form_ppg"), info.get("competition")
+        if comp_ppg is not None and comp and comp != league:
+            parts.append(f"{comp_ppg:.1f} pts/game in {_league_name(comp)}")
+        return f"{team} " + ", ".join(parts) if parts else ""
+
+    bits = [b for b in (_fmt(home, inputs.get("home") or {}), _fmt(away, inputs.get("away") or {})) if b]
+    return "Why: " + "; ".join(bits) if bits else ""
+
+
+def prediction_caveat(pred: Dict) -> str:
+    """Warning line when the prediction rests on thin or stale data —
+    empty when it doesn't."""
+    note = staleness_note(pred)
+    if pred.get("model") == "elo_fallback":
+        return "⚠️ Limited data: rating-only estimate" + (f" · {note}" if note else "")
+    return f"⚠️ Low confidence — {note}" if note else ""
+
+
+def _vs_average(ratio: float, verb: str) -> str:
+    delta = round((float(ratio) - 1.0) * 100)
+    if abs(delta) < 3:
+        return f"{verb} about the league average"
+    return f"{verb} {abs(delta)}% {'more' if delta > 0 else 'fewer'} than average"
+
+
+def team_strength_lines(pred: Dict, home: Optional[str] = None, away: Optional[str] = None) -> List[str]:
+    """Attack/defence ratings in words, venue-specific: 'Arsenal at home:
+    scores 18% more than average, concedes 12% fewer than average'. Empty
+    for rating-only fallback predictions, which have no such ratings."""
+    if pred.get("model") == "elo_fallback":
+        return []
+    home, away = _team_labels(pred, home, away)
+    attack = pred.get("team_attack_params") or {}
+    defense = pred.get("team_defense_params") or {}
+    return [
+        f"**{team} {venue}:** {_vs_average(attack.get(side, 1.0), 'scores')}, "
+        f"{_vs_average(defense.get(side, 1.0), 'concedes')}"
+        for team, side, venue in ((home, "home", "at home"), (away, "away", "away"))
+    ]
+
+
+def prediction_summary_html(
+    pred: Dict, home: Optional[str] = None, away: Optional[str] = None
+) -> str:
+    """Compact prediction block for fixture lists and match cards: verdict,
+    outcome bar, likeliest scores, reasons and any data caveat."""
+    reasons = prediction_reasons(pred, home, away)
+    caveat = prediction_caveat(pred)
+    muted = "font-size:0.8rem;color:#a0a0a0;margin-top:0.3rem;"
+    return (
+        f"<div style='font-weight:700;font-size:1rem;margin-top:0.5rem;'>"
+        f"{safe_html(prediction_verdict(pred, home, away))}</div>"
+        f"{outcome_bar_html(pred, home, away)}"
+        f"<div style='font-size:0.85rem;margin-top:0.4rem;'>{safe_html(scorelines_text(pred))}</div>"
+        + (f"<div style='{muted}'>{safe_html(reasons)}</div>" if reasons else "")
+        + (f"<div style='{muted}color:#f1c40f;'>{safe_html(caveat)}</div>" if caveat else "")
+    )
+
+
 COLORS = {
     "primary": "#37003c",
     "secondary": "#00ff85",
     "accent": "#f8f8f8",
-    "home_win": "#00ff85",
-    "draw": "#f1c40f",
-    "away_win": "#e74c3c",
+    "home_win": OUTCOME_COLORS["home"],
+    "draw": OUTCOME_COLORS["draw"],
+    "away_win": OUTCOME_COLORS["away"],
     "gold": "#FFD700",
     "silver": "#C0C0C0",
     "bronze": "#CD7F32",
@@ -460,84 +654,6 @@ def show_error_message(message: str):
     st.markdown(f'<div class="error-box">❌ {safe_html(message)}</div>', unsafe_allow_html=True)
 
 
-def _prob_bar_html(label: str, probability: float, color: str, max_width: int = 100) -> str:
-    probability = max(0.0, min(1.0, float(probability or 0)))
-    pct = probability * 100
-    width = max(5, min(pct, max_width))
-    return dedent(
-        f"""
-        <div class="prob-bar-container" style="flex:1;">
-            <div class="prob-bar-label">{safe_html(label)}</div>
-            <div class="prob-bar" style="width: {width}%; background-color: {color};">
-                {pct:.1f}%
-            </div>
-        </div>
-        """
-    ).strip()
-
-
-def probability_bar(label: str, probability: float, color: str, max_width: int = 100):
-    st.markdown(
-        _prob_bar_html(label, probability, color, max_width),
-        unsafe_allow_html=True,
-    )
-
-
-def create_outcome_pie_chart(home_win: float, draw: float, away_win: float) -> go.Figure:
-    fig = go.Figure(
-        data=[
-            go.Pie(
-                labels=["Home Win", "Draw", "Away Win"],
-                values=[home_win * 100, draw * 100, away_win * 100],
-                marker=dict(colors=[COLORS["home_win"], COLORS["draw"], COLORS["away_win"]]),
-                textinfo="label+percent",
-                textfont=dict(size=14, color="#0b0c10"),
-                hole=0.4,
-                hovertemplate="<b>%{label}</b><br>%{value:.1f}%<extra></extra>",
-            )
-        ]
-    )
-    fig.update_layout(
-        height=320,
-        margin=dict(l=20, r=20, t=20, b=20),
-        showlegend=False,
-        paper_bgcolor="rgba(0,0,0,0)",
-        font=dict(color=COLORS["text"]),
-    )
-    return fig
-
-
-def create_outcome_bars(home_win: float, draw: float, away_win: float) -> go.Figure:
-    labels = ["Away Win", "Draw", "Home Win"]
-    values = [away_win * 100, draw * 100, home_win * 100]
-    colors = [COLORS["away_win"], COLORS["draw"], COLORS["home_win"]]
-    fig = go.Figure(
-        data=[
-            go.Bar(
-                x=values,
-                y=labels,
-                orientation="h",
-                marker=dict(color=colors),
-                text=[f"{v:.1f}%" for v in values],
-                textposition="outside",
-                textfont=dict(size=13, color=COLORS["text"]),
-                hovertemplate="<b>%{y}</b>: %{x:.1f}%<extra></extra>",
-            )
-        ]
-    )
-    fig.update_layout(
-        height=180,
-        xaxis=dict(range=[0, 100], title="Probability (%)", gridcolor="#2c3e50"),
-        yaxis=dict(gridcolor="#2c3e50"),
-        margin=dict(l=10, r=10, t=10, b=30),
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(color=COLORS["text"]),
-        bargap=0.3,
-    )
-    return fig
-
-
 def create_scoreline_chart(prob_matrix: np.ndarray, max_goals: int = 5) -> go.Figure:
     matrix = prob_matrix[: max_goals + 1, : max_goals + 1]
     text = [[f"{matrix[i][j]*100:.1f}%" for j in range(max_goals + 1)] for i in range(max_goals + 1)]
@@ -661,26 +777,6 @@ def match_card_html(
     status_label = minutes or status.replace("_", " ").upper()
 
     extras = ""
-    if prediction:
-        pred_score = (prediction.get("predicted_score") or {}).get("score", "N/A")
-        expected = prediction.get("expected_goals") or {}
-        outcome = prediction.get("outcome_probabilities") or {}
-        home_win = outcome.get("home_win", 0)
-        away_win = outcome.get("away_win", 0)
-        draw = outcome.get("draw", 0)
-        # Favourite (higher win probability) gets the green bar; underdog the red.
-        if home_win >= away_win:
-            home_color, away_color = COLORS["home_win"], COLORS["away_win"]
-        else:
-            home_color, away_color = COLORS["away_win"], COLORS["home_win"]
-        extras += dedent(
-            f"""
-            <div style="font-size:0.85rem; color:#a0a0a0; text-align:center; margin-top:0.5rem;">
-                Predicted score: <b>{safe_html(pred_score)}</b> &nbsp;|&nbsp;
-                xG: {expected.get('home', 0):.2f} - {expected.get('away', 0):.2f}
-            </div>
-            """
-        ).strip()
     if venue:
         extras += dedent(
             f"""
@@ -690,15 +786,12 @@ def match_card_html(
             """
         ).strip()
     if prediction:
-        extras += dedent(
-            f"""
-            <div style="display:flex; gap:1rem; margin-top:0.5rem;">
-                {_prob_bar_html(f"🏠 {home_team}", home_win, home_color)}
-                {_prob_bar_html("🤝 Draw", draw, COLORS["draw"])}
-                {_prob_bar_html(f"✈️ {away_team}", away_win, away_color)}
-            </div>
-            """
-        ).strip()
+        expected = prediction.get("expected_goals") or {}
+        extras += prediction_summary_html(prediction, home_team, away_team)
+        extras += (
+            f"<div style='font-size:0.75rem;color:#a0a0a0;margin-top:0.2rem;'>"
+            f"Expected goals: {expected.get('home', 0):.1f} – {expected.get('away', 0):.1f}</div>"
+        )
 
     return dedent(
         f"""

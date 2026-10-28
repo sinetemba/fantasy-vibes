@@ -14,10 +14,8 @@ from app.ui import (
     display_disclaimer,
     display_header,
     form_badges_html,
-    probability_bar,
+    prediction_summary_html,
     show_warning_message,
-    staleness_note,
-    COLORS,
 )
 from src.data import LeagueService
 from src.data.utils import sast_now
@@ -250,32 +248,7 @@ def _render_fixture(service: LeagueService, m: Dict[str, Any]):
 def _render_prediction_summary(
     pred: Dict[str, Any], home: str, away: str, service: LeagueService = None
 ):
-    outcome = pred.get("outcome_probabilities", {})
-    score = pred.get("predicted_score", {})
-    with st.container():
-        c_score, c_bars = st.columns([1, 2])
-        with c_score:
-            st.markdown(
-                f"""
-                <div style="text-align:center; padding:0.5rem;">
-                    <div style="font-size:0.75rem; color:#a0a0a0;">Predicted Score</div>
-                    <div style="font-size:1.8rem; font-weight:800; color:#00ff85;">{score.get('score', '—')}</div>
-                    <div style="font-size:0.7rem; color:#a0a0a0;">{pred.get('model', '')}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-        with c_bars:
-            home_win = outcome.get("home_win", 0)
-            away_win = outcome.get("away_win", 0)
-            draw = outcome.get("draw", 0)
-            if home_win >= away_win:
-                home_color, away_color = COLORS["home_win"], COLORS["away_win"]
-            else:
-                home_color, away_color = COLORS["away_win"], COLORS["home_win"]
-            probability_bar(f"🏠 {home}", home_win, home_color)
-            probability_bar("🤝 Draw", draw, COLORS["draw"])
-            probability_bar(f"✈️ {away}", away_win, away_color)
+    st.markdown(prediction_summary_html(pred, home, away), unsafe_allow_html=True)
     if service is not None:
         st.markdown(
             f"<div style='font-size:0.8rem;color:#a0a0a0;margin-top:0.3rem;'>"
@@ -285,32 +258,5 @@ def _render_prediction_summary(
             f"&nbsp;<span style='font-size:0.7rem;'>(latest →)</span></div>",
             unsafe_allow_html=True,
         )
-    factors = _format_model_inputs(pred, home, away)
-    if factors:
-        st.caption(factors)
-    note = staleness_note(pred)
-    if note:
-        st.caption(f"⚠️ Low-confidence prediction — {note}")
     if pred.get("predicted_at"):
         st.caption(f"Predicted on {pred['predicted_at']}")
-
-
-def _format_model_inputs(pred: Dict[str, Any], home: str, away: str) -> str:
-    """Summarise the form/log-position factors behind a prediction."""
-    inputs = pred.get("model_inputs") or {}
-
-    def _fmt(team: str, info: Dict[str, Any]) -> str:
-        parts = []
-        pos, league = info.get("position"), info.get("context_league")
-        if pos and league:
-            parts.append(f"#{pos} in {league}")
-        if info.get("form_ppg") is not None:
-            parts.append(f"{info['form_ppg']:.1f} pts/game")
-        comp_ppg = info.get("comp_form_ppg")
-        comp = info.get("competition")
-        if comp_ppg is not None and comp and comp != league:
-            parts.append(f"{comp_ppg:.1f} in {comp}")
-        return f"{team}: " + " · ".join(parts) if parts else ""
-
-    bits = [_fmt(home, inputs.get("home") or {}), _fmt(away, inputs.get("away") or {})]
-    return "  |  ".join(b for b in bits if b)

@@ -6,16 +6,18 @@ import streamlit as st
 
 from app.ui import (
     apply_theme,
-    create_outcome_bars,
-    create_outcome_pie_chart,
     create_scoreline_chart,
     display_disclaimer,
     display_header,
     form_badges_html,
-    probability_bar,
+    outcome_bar_html,
+    prediction_caveat,
+    prediction_reasons,
+    prediction_verdict,
+    safe_html,
     show_error_message,
-    staleness_note,
-    COLORS,
+    team_strength_lines,
+    top_scorelines,
 )
 from src.data import LeagueService
 
@@ -89,104 +91,58 @@ def _render_form(form):
 def _display_prediction(pred, service: LeagueService):
     home = pred["home_team"]
     away = pred["away_team"]
-    outcome = pred["outcome_probabilities"]
     expected = pred["expected_goals"]
-    score = pred["predicted_score"]
 
     st.markdown("---")
     st.markdown(f"### 📊 {home} vs {away}")
 
-    c1, c2, c3 = st.columns([1, 1, 1])
-    with c1:
-        st.markdown(f"### 🏠 {home}")
-        stats = service.get_team_stats(home)
-        if stats:
-            st.caption(_stats_line(stats))
-    with c2:
-        st.markdown(
-            f"""
-            <div style="text-align:center; padding:1rem;">
-                <div style="font-size:0.9rem; color:#a0a0a0;">Predicted Score</div>
-                <div style="font-size:2.5rem; font-weight:800; color:#00ff85;">{score.get('score', '—')}</div>
-                <div style="font-size:0.8rem; color:#a0a0a0;">{score.get('probability', 0)*100:.1f}% likelihood · {pred.get('model', '')}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    with c3:
-        st.markdown(f"### ✈️ {away}")
-        stats = service.get_team_stats(away)
-        if stats:
-            st.caption(_stats_line(stats))
+    # Verdict first — it's what people read — then the one outcome bar and
+    # the reasons behind it.
+    st.markdown(
+        f"<div style='font-size:1.6rem;font-weight:800;color:#00ff85;margin:0.25rem 0;'>"
+        f"{safe_html(prediction_verdict(pred))}</div>"
+        f"{outcome_bar_html(pred)}",
+        unsafe_allow_html=True,
+    )
+    reasons = prediction_reasons(pred)
+    if reasons:
+        st.markdown(reasons)
+    caveat = prediction_caveat(pred)
+    if caveat:
+        st.warning(caveat)
 
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.metric(f"⚽ {home} xG", f"{expected.get('home', 0):.2f}")
-    with c2:
-        st.metric("⚽ Total xG", f"{expected.get('home', 0) + expected.get('away', 0):.2f}")
-    with c3:
-        st.metric(f"⚽ {away} xG", f"{expected.get('away', 0):.2f}")
+    st.markdown("#### 🎯 Most likely scores")
+    scores = top_scorelines(pred, n=3)
+    score_cols = st.columns(len(scores) or 1)
+    for col, (score, prob) in zip(score_cols, scores):
+        col.metric(score, f"{prob * 100:.0f}%")
+    st.caption(
+        "Even the likeliest exact score happens only this often — "
+        "the outcome bar above is the better guide."
+    )
 
-    st.markdown("---")
-    st.markdown("### 📊 Outcome Probabilities")
-    cb, cp = st.columns([3, 2])
-    with cb:
-        probability_bar(f"🏠 {home}", outcome.get("home_win", 0), COLORS["home_win"])
-        probability_bar("🤝 Draw", outcome.get("draw", 0), COLORS["draw"])
-        probability_bar(f"✈️ {away}", outcome.get("away_win", 0), COLORS["away_win"])
-        st.plotly_chart(create_outcome_bars(outcome.get("home_win", 0), outcome.get("draw", 0), outcome.get("away_win", 0)), use_container_width=True)
-    with cp:
-        st.plotly_chart(create_outcome_pie_chart(outcome.get("home_win", 0), outcome.get("draw", 0), outcome.get("away_win", 0)), use_container_width=True)
+    st.markdown("#### 📋 Goals")
+    g1, g2, g3, g4 = st.columns(4)
+    g1.metric(f"{home} expected goals", f"{expected.get('home', 0):.1f}")
+    g2.metric(f"{away} expected goals", f"{expected.get('away', 0):.1f}")
+    g3.metric("Over 2.5 goals", f"{(pred.get('over_under_2_5') or {}).get('over', 0) * 100:.0f}%")
+    g4.metric("Both teams score", f"{(pred.get('btts') or {}).get('yes', 0) * 100:.0f}%")
 
-    st.markdown("---")
-    st.markdown("### 📋 Markets")
-    m1, m2, m3, m4 = st.columns(4)
-    with m1:
-        ou = pred.get("over_under_2_5", {})
-        st.metric("Over 2.5", f"{ou.get('over', 0)*100:.1f}%")
-    with m2:
-        st.metric("Under 2.5", f"{ou.get('under', 0)*100:.1f}%")
-    with m3:
-        btts = pred.get("btts", {})
-        st.metric("BTTS Yes", f"{btts.get('yes', 0)*100:.1f}%")
-    with m4:
-        st.metric("BTTS No", f"{btts.get('no', 0)*100:.1f}%")
+    strength = team_strength_lines(pred)
+    home_stats = service.get_team_stats(home)
+    away_stats = service.get_team_stats(away)
+    if strength or home_stats or away_stats:
+        st.markdown("#### 📈 Team strength")
+        for line in strength:
+            st.markdown(line)
+        for team, stats in ((home, home_stats), (away, away_stats)):
+            if stats:
+                st.caption(f"{team}: {_stats_line(stats)}")
 
-    st.markdown("---")
-    st.markdown("### 🎯 Scoreline Probability Matrix")
     matrix = pred.get("score_matrix")
     if matrix is not None:
-        st.plotly_chart(create_scoreline_chart(matrix, max_goals=5), use_container_width=True)
-
-    st.markdown("---")
-    st.markdown("### 📈 Attack / Defense Ratings")
-    attack = pred.get("team_attack_params", {})
-    defense = pred.get("team_defense_params", {})
-    a1, a2 = st.columns(2)
-    with a1:
-        st.metric(f"{home} attack", f"{attack.get('home', 1.0):.3f}")
-        st.metric(f"{home} defense", f"{defense.get('home', 1.0):.3f}")
-    with a2:
-        st.metric(f"{away} attack", f"{attack.get('away', 1.0):.3f}")
-        st.metric(f"{away} defense", f"{defense.get('away', 1.0):.3f}")
-
-    note = staleness_note(pred)
-    if note:
-        st.warning(f"Prediction confidence is limited — {note}.")
-
-    inputs = pred.get("model_inputs") or {}
-    for label, info in ((home, inputs.get("home") or {}), (away, inputs.get("away") or {})):
-        bits = []
-        if info.get("position") and info.get("context_league"):
-            bits.append(f"#{info['position']} in {info['context_league']}")
-        if info.get("form_ppg") is not None:
-            bits.append(f"{info['form_ppg']:.1f} pts/game")
-        comp_ppg = info.get("comp_form_ppg")
-        comp = info.get("competition")
-        if comp_ppg is not None and comp and comp != info.get("context_league"):
-            bits.append(f"{comp_ppg:.1f} in {comp}")
-        if bits:
-            st.caption(f"{label}: " + " · ".join(bits))
+        with st.expander("Full scoreline probabilities"):
+            st.plotly_chart(create_scoreline_chart(matrix, max_goals=5), use_container_width=True)
 
     st.caption(f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
