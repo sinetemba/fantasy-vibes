@@ -1,6 +1,6 @@
 """Composite data source that cascades over multiple free providers."""
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .base import DataSource
 
@@ -32,25 +32,40 @@ class CompositeDataSource(DataSource):
     def get_matches(
         self, league_config: Dict[str, Any], season: Optional[str] = None
     ) -> List[Dict[str, Any]]:
-        self.last_matches_source = None
+        matches, self.last_matches_source = self.get_matches_with_source(
+            league_config, season
+        )
+        return matches
+
+    def get_standings(
+        self, league_config: Dict[str, Any], season: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        standings, self.last_standings_source = self.get_standings_with_source(
+            league_config, season
+        )
+        return standings
+
+    # The *_with_source variants return the producing source alongside the
+    # data — safe when one composite is shared across threads, unlike the
+    # last_*_source attributes which any concurrent call can overwrite.
+    def get_matches_with_source(
+        self, league_config: Dict[str, Any], season: Optional[str] = None
+    ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
         for source in self.match_sources:
             if not source.is_available(league_config):
                 continue
             matches = source.get_matches(league_config, season)
             if matches:
-                self.last_matches_source = source.name
-                return matches
-        return []
+                return matches, source.name
+        return [], None
 
-    def get_standings(
+    def get_standings_with_source(
         self, league_config: Dict[str, Any], season: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
-        self.last_standings_source = None
+    ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
         for source in self.standings_sources:
             if not source.is_available(league_config):
                 continue
             standings = source.get_standings(league_config, season)
             if standings:
-                self.last_standings_source = source.name
-                return standings
-        return []
+                return standings, source.name
+        return [], None

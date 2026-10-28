@@ -5,6 +5,7 @@ from itertools import groupby
 from typing import Any, Dict, List
 
 MAX_BATCH_PREDICTIONS = 20
+FIXTURES_PAGE_SIZE = 30
 
 import streamlit as st
 
@@ -48,11 +49,33 @@ def render(service: LeagueService):
         st.info("No fixtures match the selected filters.")
         return
 
-    for date_label, day_matches in groupby(filtered, key=lambda m: _date_label(m)):
+    # Page the list — each fixture is several widgets, so rendering a full
+    # season at once makes every rerun slow. Any filter change starts over.
+    signature = (
+        service.get_current_code(),
+        st.session_state.get("fixtures_round"),
+        st.session_state.get("fixtures_use_date"),
+        str(st.session_state.get("fixtures_date")),
+        st.session_state.get("fixtures_this_week"),
+        st.session_state.get("fixtures_show_all_upcoming"),
+        st.session_state.get("fixtures_show_completed"),
+    )
+    if st.session_state.get("fixtures_page_sig") != signature:
+        st.session_state["fixtures_page_sig"] = signature
+        st.session_state["fixtures_limit"] = FIXTURES_PAGE_SIZE
+    limit = st.session_state["fixtures_limit"]
+
+    for date_label, day_matches in groupby(filtered[:limit], key=lambda m: _date_label(m)):
         st.markdown(f"### 📆 {date_label}")
         for m in day_matches:
             _render_fixture(service, m)
         st.markdown("---")
+
+    if len(filtered) > limit:
+        st.caption(f"Showing {limit} of {len(filtered)} fixtures")
+        if st.button("⬇️ Show more", use_container_width=True, key="fixtures_show_more"):
+            st.session_state["fixtures_limit"] = limit + FIXTURES_PAGE_SIZE
+            st.rerun()
 
     display_disclaimer()
 

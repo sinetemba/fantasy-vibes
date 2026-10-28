@@ -5,11 +5,12 @@ import json
 import logging
 import math
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Set
+from typing import Any, Callable, Dict, List, Optional, Tuple, Set
 
 from .prediction_engine import (
     PredictionEngine,
@@ -134,17 +135,23 @@ def match_importance(m: Dict[str, Any]) -> float:
     return base
 
 
-def _dedupe_matches(matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def dedupe_matches(
+    matches: List[Dict[str, Any]],
+    prefer: Optional[Callable[[Dict[str, Any], Dict[str, Any]], bool]] = None,
+) -> List[Dict[str, Any]]:
     """Drop duplicate rows for the same fixture coming from different feeds
     (current + historical + related pools overlap). Buckets candidates by
     match day ±1 so fixtures_equivalent only compares near neighbours —
-    O(n) per bucket instead of O(n²) over the whole pool."""
-    by_day: Dict[str, List[Dict[str, Any]]] = {}
-    undated: List[Dict[str, Any]] = []
+    O(n) per bucket instead of O(n²) over the whole pool.
+
+    By default the earliest-dated row wins; `prefer(candidate, kept)`
+    returning True swaps a later duplicate in for the row already kept."""
+    by_day: Dict[str, List[int]] = {}
+    undated: List[int] = []
     unique: List[Dict[str, Any]] = []
     for m in sorted(matches, key=lambda x: x.get("date") or ""):
         day = (m.get("date") or "")[:10]
-        candidates: List[Dict[str, Any]] = list(undated)
+        candidates: List[int] = list(undated)
         if day:
             try:
                 d = date.fromisoformat(day)
@@ -153,11 +160,16 @@ def _dedupe_matches(matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                         by_day.get((d + timedelta(days=delta)).isoformat(), [])
                     )
             except ValueError:
-                candidates = unique
-        if any(fixtures_equivalent(m, u) for u in candidates):
+                candidates = list(range(len(unique)))
+        dup = next(
+            (i for i in candidates if fixtures_equivalent(m, unique[i])), None
+        )
+        if dup is not None:
+            if prefer and prefer(m, unique[dup]):
+                unique[dup] = m
             continue
+        (by_day.setdefault(day, []) if day else undated).append(len(unique))
         unique.append(m)
-        (by_day.setdefault(day, []) if day else undated).append(m)
     return unique
 
 
@@ -205,6 +217,11 @@ class LeagueService:
         self._match_source_name = None
         self._standings_source_name = None
         self._engine = PredictionEngine()
+        # Services are shared across sessions and threads. Writers (warm-up,
+        # background refresh, Live refresh, Retrain) serialise on this lock
+        # and build new state in locals before swapping it in, so readers
+        # take no lock and never see a half-updated service.
+        self._lock = threading.RLock()
         self.set_league(league_code)
 
     def _load_leagues(self) -> Dict[str, Dict[str, Any]]:
@@ -222,51 +239,71 @@ class LeagueService:
         self._current_league = self._leagues[code]
         self._refresh()
 
-    def _refresh(self):
-        self._group_match_cache.clear()
-        self._form_index = None
+    def _refresh(self, refit: bool = False):
+        """Full reload: matches, standings, history, related leagues and the
+        model. `refit` retrains even when a fresh persisted model exists."""
+        with self._lock:
+            league = self._current_league
 
-        # Matches and standings use disjoint provider lists, so they fetch
-        # in parallel. Historical pulls depend on which source won the
-        # match cascade, so they start once matches land and overlap the
-        # standings fetch.
-        with ThreadPoolExecutor(max_workers=3) as pool:
-            matches_fut = pool.submit(self._source.get_matches, self._current_league)
-            standings_fut = pool.submit(self._source.get_standings, self._current_league)
-            self.matches = matches_fut.result()
-            self._match_source_name = self._source.last_matches_source
-            hist_fut = pool.submit(self._fetch_historical)
-            self.standings = standings_fut.result()
-            self._standings_source_name = self._source.last_standings_source
-            self._historical_matches = hist_fut.result()
+            # Matches and standings use disjoint provider lists, so they
+            # fetch in parallel. Historical pulls depend on which source won
+            # the match cascade, so they start once matches land and overlap
+            # the standings fetch.
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                matches_fut = pool.submit(self._source.get_matches_with_source, league)
+                standings_fut = pool.submit(self._source.get_standings_with_source, league)
+                matches, match_source = matches_fut.result()
+                hist_fut = pool.submit(self._fetch_historical, match_source)
+                standings, standings_source = standings_fut.result()
+                historical = hist_fut.result()
 
-        if self._current_league.get("senior_only"):
-            self.matches = _senior_teams_only(self.matches)
-        # Fallback to a live table computed from results if no source provides standings.
-        if not self.standings and self.matches and not self._current_league.get("no_table"):
-            self._standings_source_name = "computed"
+            if league.get("senior_only"):
+                matches = _senior_teams_only(matches)
+            # Fallback to a live table computed from results if no source provides standings.
+            if not standings and matches and not league.get("no_table"):
+                standings_source = "computed"
 
-        # Tag every match with its competition so the engine can track
-        # per-tournament form (e.g. domestic league vs Champions League).
-        for m in self.matches:
-            m.setdefault("competition", self._current_code)
-        for m in self._historical_matches:
-            m.setdefault("competition", self._current_code)
+            # Tag every match with its competition so the engine can track
+            # per-tournament form (e.g. domestic league vs Champions League).
+            for m in matches:
+                m.setdefault("competition", self._current_code)
+            for m in historical:
+                m.setdefault("competition", self._current_code)
 
-        # Pull related competitions (e.g. the domestic leagues of CL/EL clubs)
-        # so predictions can use each team's own log position and other-
-        # tournament form.
-        self._related = self._load_related()
+            # Pull related competitions (e.g. the domestic leagues of CL/EL
+            # clubs) so predictions can use each team's own log position and
+            # other-tournament form.
+            related = self._load_related()
 
-        self._load_or_fit_model()
-        self._team_contexts = self._build_team_contexts()
+            engine = None
+            if not refit and self._model_is_fresh():
+                try:
+                    engine = self._load_model()
+                    self._seed_elo(engine)
+                except Exception as exc:
+                    logger.warning(f"Persisted model invalid, retraining: {exc}")
+                    engine = None
+            if engine is None:
+                engine = self._train_engine(matches, historical, related, match_source)
+            contexts = self._build_team_contexts(engine, matches, standings, related)
 
-    def _fetch_historical(self) -> List[Dict[str, Any]]:
+            self.matches = matches
+            self.standings = standings
+            self._historical_matches = historical
+            self._related = related
+            self._match_source_name = match_source
+            self._standings_source_name = standings_source
+            self._engine = engine
+            self._team_contexts = contexts
+            self._form_index = None
+            self._group_match_cache.clear()
+
+    def _fetch_historical(self, match_source: Optional[str]) -> List[Dict[str, Any]]:
         """Pull configured historical/archived seasons as extra training data."""
         historical: List[Dict[str, Any]] = []
 
         # Pull openfootball history as extra training data when the live source is different
-        if "openfootball" in self._current_league and self._match_source_name != "openfootball":
+        if "openfootball" in self._current_league and match_source != "openfootball":
             try:
                 historical = OpenfootballSource().get_matches(self._current_league)
             except Exception:
@@ -336,15 +373,21 @@ class LeagueService:
                 related[code] = data
         return related
 
-    def _build_team_contexts(self) -> Dict[str, Dict[str, Any]]:
+    def _build_team_contexts(
+        self,
+        engine: PredictionEngine,
+        matches: List[Dict[str, Any]],
+        standings: List[Dict[str, Any]],
+        related: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, Dict[str, Any]]:
         """Per-team log context: position, league size and points-per-game."""
         contexts: Dict[str, Dict[str, Any]] = {}
 
-        standings = self.get_standings()
-        size = len(standings)
-        for row in standings:
+        table = self._standings_for(matches, standings)
+        size = len(table)
+        for row in table:
             played = row.get("played") or 0
-            contexts[self._engine.resolve_name(row["team"])] = {
+            contexts[engine.resolve_name(row["team"])] = {
                 "position": row.get("position"),
                 "league_size": size,
                 "ppg": (row.get("points", 0) / played) if played else None,
@@ -352,44 +395,65 @@ class LeagueService:
             }
 
         # Teams not in the current log (e.g. foreign CL/EL opponents) get the
-        # context of their domestic league log instead.
-        for code, data in self._related.items():
-            table = data["standings"]
-            if not table:
+        # context of their domestic league log instead. Each distinct feed
+        # name is resolved once, not once per match per related league.
+        pending: Dict[str, str] = {}
+        for m in matches:
+            for team in (m.get("home_team"), m.get("away_team")):
+                if team and team not in pending:
+                    pending[team] = engine.resolve_name(team)
+        pending = {t: c for t, c in pending.items() if c not in contexts}
+
+        for code, data in related.items():
+            if not pending:
+                break
+            rel_table = data["standings"]
+            if not rel_table:
                 continue
-            names = {r["team"] for r in table}
-            by_name = {r["team"]: r for r in table}
-            for m in self.matches:
-                for team in (m.get("home_team"), m.get("away_team")):
-                    if not team:
-                        continue
-                    canonical = self._engine.resolve_name(team)
-                    if canonical in contexts:
-                        continue
-                    resolved = self._resolve_team(team, names)
-                    if resolved not in by_name:
-                        continue
-                    row = by_name[resolved]
-                    played = row.get("played") or 0
-                    contexts[canonical] = {
-                        "position": row.get("position"),
-                        "league_size": len(table),
-                        "ppg": (row.get("points", 0) / played) if played else None,
-                        "competition": code,
-                    }
+            by_name = {r["team"]: r for r in rel_table}
+            names = set(by_name)
+            for team, canonical in list(pending.items()):
+                if canonical in contexts:
+                    del pending[team]
+                    continue
+                resolved = self._resolve_team(team, names, engine)
+                if resolved not in by_name:
+                    continue
+                row = by_name[resolved]
+                played = row.get("played") or 0
+                contexts[canonical] = {
+                    "position": row.get("position"),
+                    "league_size": len(rel_table),
+                    "ppg": (row.get("points", 0) / played) if played else None,
+                    "competition": code,
+                }
+                del pending[team]
         return contexts
 
-    def refresh(self):
-        """Public helper to reload data and retrain the model."""
-        self._refresh()
+    def refresh(self, refit: bool = False):
+        """Public helper to reload all data; `refit` forces a retrain."""
+        self._refresh(refit=refit)
+
+    def _refit(self) -> None:
+        """Retrain on the loaded data and swap the new engine in. Raises on
+        failure, leaving the current engine in place."""
+        with self._lock:
+            engine = self._train_engine(
+                self.matches, self._historical_matches, self._related,
+                self._match_source_name,
+            )
+            contexts = self._build_team_contexts(
+                engine, self.matches, self.standings, self._related
+            )
+            self._engine = engine
+            self._team_contexts = contexts
 
     def refit_model(self):
         """Retrain the prediction model on the currently loaded match data —
         used by startup warm-up so predictions reflect the latest results
         rather than a still-'fresh' model file trained on older data."""
         try:
-            self._fit_model()
-            self._seed_national_elo()
+            self._refit()
         except Exception as exc:
             logger.warning(f"Model refit failed for {self._current_code}: {exc}")
 
@@ -397,48 +461,66 @@ class LeagueService:
         """Lightweight refresh of just the match list — standings and the
         prediction model are untouched. Pairs with utils.bust_live_cache()
         so the fetch bypasses the HTTP TTL and picks up live scores."""
-        try:
-            matches = self._source.get_matches(self._current_league)
-        except Exception as exc:
-            logger.warning(f"Live match refresh failed: {exc}")
-            return
-        if not matches:
-            return
-        if self._current_league.get("senior_only"):
-            matches = _senior_teams_only(matches)
-        for m in matches:
-            m.setdefault("competition", self._current_code)
-        prev_ft = {
-            m.get("match_id") for m in self.matches if m.get("status") == "full_time"
-        }
-        self.matches = matches
-        self._match_source_name = self._source.last_matches_source
-        self._form_index = None
-        self._group_match_cache.clear()
-        # If games just finished, the model's inputs changed — refit so the
-        # very next prediction reflects the latest results.
-        new_results = [
-            m
-            for m in matches
-            if m.get("status") == "full_time"
-            and m.get("match_id")
-            and m.get("match_id") not in prev_ft
-        ]
-        if new_results:
-            # Positions/PPG move when results land — patch the table and
-            # rebuild contexts before refitting so predict() sees them.
-            self._apply_results_to_standings(new_results)
-            self._team_contexts = self._build_team_contexts()
-            self._fit_model()
-            self._seed_national_elo()
+        with self._lock:
+            try:
+                matches, match_source = self._source.get_matches_with_source(
+                    self._current_league
+                )
+            except Exception as exc:
+                logger.warning(f"Live match refresh failed: {exc}")
+                return
+            if not matches:
+                return
+            if self._current_league.get("senior_only"):
+                matches = _senior_teams_only(matches)
+            for m in matches:
+                m.setdefault("competition", self._current_code)
+            prev_ft = {
+                m.get("match_id") for m in self.matches if m.get("status") == "full_time"
+            }
+            # If games just finished, the model's inputs changed — refit so
+            # the very next prediction reflects the latest results.
+            new_results = [
+                m
+                for m in matches
+                if m.get("status") == "full_time"
+                and m.get("match_id")
+                and m.get("match_id") not in prev_ft
+            ]
+            standings, engine, contexts = self.standings, self._engine, self._team_contexts
+            if new_results:
+                # Positions/PPG move when results land — patch the table and
+                # rebuild contexts against the refitted engine.
+                standings = self._apply_results_to_standings(self.standings, new_results)
+                try:
+                    engine = self._train_engine(
+                        matches, self._historical_matches, self._related, match_source
+                    )
+                except Exception as exc:
+                    logger.warning(f"Model refit failed for {self._current_code}: {exc}")
+                contexts = self._build_team_contexts(
+                    engine, matches, standings, self._related
+                )
 
-    def _apply_results_to_standings(self, results: List[Dict[str, Any]]) -> None:
-        """Patch the loaded standings in place with just-finished results —
+            self.matches = matches
+            self.standings = standings
+            self._match_source_name = match_source
+            self._engine = engine
+            self._team_contexts = contexts
+            self._form_index = None
+            self._group_match_cache.clear()
+
+    def _apply_results_to_standings(
+        self, standings: List[Dict[str, Any]], results: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Return a copy of the standings patched with just-finished results —
         cheaper and safer than recomputing the table, which would lose data
-        for leagues whose provider table covers more than the match window."""
-        if not self.standings:
-            return
-        by_team = {_norm_key(r.get("team", "")): r for r in self.standings}
+        for leagues whose provider table covers more than the match window.
+        Rows are copied so readers of the old table never see it change."""
+        if not standings:
+            return standings
+        standings = [dict(r) for r in standings]
+        by_team = {_norm_key(r.get("team", "")): r for r in standings}
         touched = False
         for m in results:
             hs, aws = m.get("home_score"), m.get("away_score")
@@ -458,7 +540,7 @@ class LeagueService:
                 row["points"] = (row.get("points") or 0) + pts
             touched = True
         if touched:
-            self.standings.sort(
+            standings.sort(
                 key=lambda r: (
                     -(r.get("points") or 0),
                     -(r.get("goal_difference") or 0),
@@ -466,8 +548,9 @@ class LeagueService:
                     r.get("team", ""),
                 )
             )
-            for i, row in enumerate(self.standings, 1):
+            for i, row in enumerate(standings, 1):
                 row["position"] = i
+        return standings
 
     def get_leagues(self) -> List[Tuple[str, str]]:
         # Grouped leagues (e.g. international competitions) are browsed on
@@ -571,17 +654,11 @@ class LeagueService:
         # via different feeds (e.g. a qualifiers feed listing a Nations
         # League game). INTF is the catch-all friendlies bucket, so on a
         # collision the more specific competition's entry wins.
-        unique: List[Dict[str, Any]] = []
-        for m in matches:
-            prev = next(
-                (i for i, u in enumerate(unique) if fixtures_equivalent(u, m)),
-                None,
-            )
-            if prev is None:
-                unique.append(m)
-            elif unique[prev].get("competition") == "INTF" and m.get("competition") != "INTF":
-                unique[prev] = m
-        matches = unique
+        matches = dedupe_matches(
+            matches,
+            prefer=lambda new, kept: kept.get("competition") == "INTF"
+            and new.get("competition") != "INTF",
+        )
 
         matches.sort(key=lambda x: x["date"] or "")
         self._group_match_cache[group] = (time.time(), matches)
@@ -603,22 +680,24 @@ class LeagueService:
     def _compute_table(matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         return compute_table(matches)
 
-    def _compute_table_from_matches(self) -> List[Dict[str, Any]]:
-        return self._compute_table(self.matches)
-
-    def get_standings(self) -> List[Dict[str, Any]]:
+    def _standings_for(
+        self, matches: List[Dict[str, Any]], standings: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
         # Some competitions (e.g. friendlies) have no meaningful table.
         if self._current_league.get("no_table"):
             return []
-        if not self.standings:
-            return self._compute_table_from_matches()
-        return self.standings
+        return standings or self._compute_table(matches)
 
-    def _resolve_team(self, team: str, pool: Set[str]) -> str:
+    def get_standings(self) -> List[Dict[str, Any]]:
+        return self._standings_for(self.matches, self.standings)
+
+    def _resolve_team(
+        self, team: str, pool: Set[str], engine: Optional[PredictionEngine] = None
+    ) -> str:
         if team in pool:
             return team
         # Cross-source canonical names (e.g. "Arsenal FC" -> "Arsenal").
-        resolved = self._engine.resolve_name(team)
+        resolved = (engine or self._engine).resolve_name(team)
         if resolved in pool:
             return resolved
         # Case-insensitive exact match as a cheap normalisation step.
@@ -641,23 +720,28 @@ class LeagueService:
     def _played_index(self) -> Dict[str, List[Dict[str, Any]]]:
         """team -> its completed matches, oldest first. Built once per
         refresh so repeated form lookups don't rescan the whole pool."""
-        if self._form_index is None:
-            pool = list(self.matches) + list(self._historical_matches)
+        index = self._form_index
+        if index is None:
+            matches = self.matches
+            pool = list(matches) + list(self._historical_matches)
             for data in self._related.values():
                 pool.extend(data["matches"])
             played = [
                 m
-                for m in _dedupe_matches(pool)
+                for m in dedupe_matches(pool)
                 if m.get("status") == "full_time" and m.get("home_score") is not None
             ]
             played.sort(key=lambda m: m.get("date") or "")
-            index: Dict[str, List[Dict[str, Any]]] = {}
+            index = {}
             for m in played:
                 index.setdefault(m.get("home_team") or "", []).append(m)
                 index.setdefault(m.get("away_team") or "", []).append(m)
             index.pop("", None)
-            self._form_index = index
-        return self._form_index
+            # A writer may have swapped in new matches mid-build — only
+            # cache the index if it still describes the current data.
+            if self.matches is matches:
+                self._form_index = index
+        return index
 
     def get_team_form(self, team: str, n: int = 5) -> List[Dict[str, Any]]:
         """Last-n results for a team, oldest first. Uses current + historical
@@ -736,21 +820,21 @@ class LeagueService:
         except Exception:
             return False
 
-    def _save_model(self) -> None:
-        if not self._engine.fitted:
+    def _save_model(self, engine: PredictionEngine) -> None:
+        if not engine.fitted:
             return
         try:
             MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
             with open(self._model_path(), "w", encoding="utf-8") as f:
-                json.dump(self._engine.to_dict(), f, indent=2)
+                json.dump(engine.to_dict(), f, indent=2)
         except Exception as exc:
             logger.warning(f"Could not save model: {exc}")
 
-    def _load_model(self) -> None:
+    def _load_model(self) -> PredictionEngine:
         with open(self._model_path(), "r", encoding="utf-8") as f:
             data = json.load(f)
-        self._engine = PredictionEngine.from_dict(data)
         logger.info(f"Loaded persisted model for {self._current_code}")
+        return PredictionEngine.from_dict(data)
 
     def _national_seed(self) -> Dict[str, float]:
         """Elo priors for national teams — only used for international leagues."""
@@ -785,56 +869,57 @@ class LeagueService:
         apply (club values are meaningless for international pools)."""
         return {**self._team_value_seed(), **self._national_seed()}
 
-    def _load_or_fit_model(self) -> None:
-        if self._model_is_fresh():
-            try:
-                self._load_model()
-            except Exception as exc:
-                logger.warning(f"Persisted model invalid, retraining: {exc}")
-                self._fit_model()
-        else:
-            self._fit_model()
-        self._seed_national_elo()
-
-    def _seed_national_elo(self) -> None:
+    def _seed_elo(self, engine: PredictionEngine) -> None:
         """Merge ranking/value priors into the engine's Elo table. Trained
         values win where they exist; seeded ratings make the fallback path
         useful for teams with no completed-match history."""
         seed = self._elo_seed()
         if seed:
-            self._engine.elo = {**seed, **self._engine.elo}
-            self._engine.elo_prior.update(
+            engine.elo = {**seed, **engine.elo}
+            engine.elo_prior.update(
                 {
                     _TEAM_KEY_ALIASES.get(_norm_key(k), _norm_key(k)): float(v)
                     for k, v in seed.items()
                 }
             )
 
-    def _fit_model(self) -> None:
-        """Train the prediction engine on current + historical matches."""
-        training = list(self.matches)
-        if self._match_source_name != "openfootball" and self._historical_matches:
-            training.extend(self._historical_matches)
+    def _train_engine(
+        self,
+        matches: List[Dict[str, Any]],
+        historical: List[Dict[str, Any]],
+        related: Dict[str, Dict[str, Any]],
+        match_source: Optional[str],
+    ) -> PredictionEngine:
+        """Train, persist and seed a new engine on current + historical
+        matches. Never touches self — callers swap the result in."""
+        training = list(matches)
+        if match_source != "openfootball" and historical:
+            training.extend(historical)
         # Other tournaments (e.g. domestic leagues of CL/EL clubs).
-        for data in self._related.values():
+        for data in related.values():
             training.extend(data["matches"])
-        self._engine = PredictionEngine()
-        self._engine.fit(
+        engine = PredictionEngine()
+        engine.fit(
             training,
             initial_elo=self._elo_seed(),
             primary_competition=self._current_code,
         )
-        self._save_model()
+        self._save_model(engine)
+        self._seed_elo(engine)
+        return engine
 
     def predict(self, home_team: str, away_team: str, neutral: bool = False) -> Dict[str, Any]:
         """Return a prediction from the currently trained model."""
-        home = self._resolve_team(home_team, self._engine.teams)
-        away = self._resolve_team(away_team, self._engine.teams)
+        # One read of each so a concurrent swap can't pair a new engine
+        # with old contexts mid-prediction.
+        engine, team_contexts = self._engine, self._team_contexts
+        home = self._resolve_team(home_team, engine.teams, engine)
+        away = self._resolve_team(away_team, engine.teams, engine)
         contexts = {
-            home: self._team_contexts.get(home),
-            away: self._team_contexts.get(away),
+            home: team_contexts.get(home),
+            away: team_contexts.get(away),
         }
-        return self._engine.predict(
+        return engine.predict(
             home, away, neutral, competition=self._current_code, contexts=contexts
         )
 
@@ -845,7 +930,7 @@ class LeagueService:
     def train(self) -> Dict[str, Any]:
         """Force a fresh retrain and return model status."""
         try:
-            self._fit_model()
+            self._refit()
         except Exception as exc:
             logger.warning(f"Model retraining failed: {exc}")
             return {

@@ -1,7 +1,9 @@
 """Shared UI components, dark/night mode theming and reusable charts."""
 
 import html
+import logging
 import threading
+import time
 from datetime import datetime
 from textwrap import dedent
 from typing import Dict, List, Optional
@@ -13,11 +15,29 @@ import streamlit as st
 
 from src.data import LeagueService
 
+logger = logging.getLogger(__name__)
 
-@st.cache_resource(ttl=3600, show_spinner=False)
+# No TTL: an expiring entry makes the next visitor wait through a full
+# fetch + refit. The background refresher below keeps services current.
+@st.cache_resource(show_spinner=False)
+def _cached_league_service(code: str) -> LeagueService:
+    return LeagueService(code)
+
+
 def get_league_service(code: str) -> LeagueService:
     """Shared LeagueService per league code, cached across reruns and sessions."""
-    return LeagueService(code)
+    svc = _cached_league_service(code)
+    # When Streamlit hot-reloads changed code, the cache still holds
+    # instances of the old class, which lack any newly added methods.
+    if not is_current_service(svc):
+        _cached_league_service.clear()
+        svc = _cached_league_service(code)
+    return svc
+
+
+def is_current_service(svc) -> bool:
+    """False for services built from a class definition replaced by a reload."""
+    return type(svc) is LeagueService
 
 
 def prewarm_league_services(codes: List[str], limit: int = 4) -> None:
@@ -34,36 +54,61 @@ def prewarm_league_services(codes: List[str], limit: int = 4) -> None:
         threading.Thread(target=_warm, args=(code,), daemon=True).start()
 
 
-def prewarm_all_services() -> None:
-    """Startup warm-up: pull the latest results for every configured league
-    (dropdown + international group) and refit each prediction model on the
-    fresh data — all on one sequential daemon thread so it never blocks the
-    UI or hammers providers."""
+# Background refresh cadence — matches the current-season HTTP TTL, so each
+# pass reloads standings and results that have actually expired.
+BACKGROUND_REFRESH_SECONDS = 1800
 
-    def _warm():
+
+def _refresh_loop() -> None:
+    """Warm every configured league (dropdown + international group), then
+    fully reload and refit each one every BACKGROUND_REFRESH_SECONDS. One
+    sequential thread so it never blocks the UI or hammers providers;
+    services swap new state in atomically, so readers keep the old data
+    until a reload finishes."""
+    from src.data.league_service import _leagues_registry
+    from src.data.utils import bust_live_cache
+
+    first = True
+    while True:
         try:
-            from src.data.league_service import _leagues_registry
-            from src.data.utils import bust_live_cache
-
-            # Bypass TTLs while warming so models train on the latest results.
-            bust_live_cache(300)
+            if first:
+                # Bypass TTLs while warming so models train on the latest results.
+                bust_live_cache(300)
             leagues = _leagues_registry()
             codes = [c for c, cfg in leagues.items() if not cfg.get("group")]
             codes += [c for c, cfg in leagues.items() if cfg.get("group")]
             for code in codes:
                 try:
                     svc = get_league_service(code)
-                    # A cached service may hold stale in-memory matches —
-                    # pull fresh ones before refitting so the model trains
-                    # on the latest results, not just a stale model file.
-                    svc.refresh_live_matches()
-                    svc.refit_model()
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                    if first:
+                        # A cached service may hold stale in-memory matches —
+                        # pull fresh ones before refitting so the model trains
+                        # on the latest results, not just a stale model file.
+                        svc.refresh_live_matches()
+                        svc.refit_model()
+                    else:
+                        svc.refresh(refit=True)
+                except Exception as exc:
+                    logger.warning(f"Background refresh failed for {code}: {exc}")
+        except Exception as exc:
+            logger.warning(f"Background refresh pass failed: {exc}")
+        first = False
+        time.sleep(BACKGROUND_REFRESH_SECONDS)
 
-    threading.Thread(target=_warm, daemon=True).start()
+
+@st.cache_resource(show_spinner=False)
+def _background_refresher() -> threading.Thread:
+    # cache_resource makes this once per process (and survives Streamlit's
+    # module reloads), so every session shares one refresh thread.
+    thread = threading.Thread(target=_refresh_loop, daemon=True, name="league-refresh")
+    thread.start()
+    return thread
+
+
+def prewarm_all_services() -> None:
+    """Start the process-wide warm-up/refresh thread. Idempotent — safe to
+    call from every session."""
+    _background_refresher()
 
 
 # A model whose newest training result is older than this is likely stale

@@ -18,8 +18,7 @@ from app.ui import (
     match_card_html,
 )
 from src.data import LeagueService
-from src.data.league_service import match_importance
-from src.data.prediction_engine import fixtures_equivalent
+from src.data.league_service import dedupe_matches, match_importance
 from src.data.sources.bbc import BBCSource
 from src.data.sources.composite import CompositeDataSource
 from src.data.sources.fixture_download import FixtureDownloadSource
@@ -45,13 +44,12 @@ def _match_date(m: Dict[str, Any]) -> date:
 
 
 def _dedupe_fixtures(fixtures: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Collapse rows for the same fixture coming from different feeds."""
-    unique: List[Dict[str, Any]] = []
-    for m in fixtures:
-        if any(fixtures_equivalent(m, u) for u in unique):
-            continue
-        unique.append(m)
-    return unique
+    """Collapse rows for the same fixture coming from different feeds. Feeds
+    are appended in priority order, so on a collision the earlier row wins."""
+    rank = {id(m): i for i, m in enumerate(fixtures)}
+    return dedupe_matches(
+        fixtures, prefer=lambda new, kept: rank[id(new)] < rank[id(kept)]
+    )
 
 
 @st.cache_data(ttl=3600, show_spinner=False)

@@ -18,7 +18,12 @@ try:
 except Exception:
     pass
 
-from app.ui import apply_theme, get_league_service, prewarm_all_services
+from app.ui import (
+    apply_theme,
+    get_league_service,
+    is_current_service,
+    prewarm_all_services,
+)
 from src.data import LeagueService
 from src.data.league_service import LEAGUES_PATH
 
@@ -75,9 +80,13 @@ def _save_preferences():
 
 
 def init_session_state():
-    if "league_service" not in st.session_state:
-        default = _default_league_code()
-        st.session_state.league_service = get_league_service(default)
+    svc = st.session_state.get("league_service")
+    if svc is None:
+        st.session_state.league_service = get_league_service(_default_league_code())
+    elif not is_current_service(svc):
+        # Session holds a service from before a code reload — swap in a
+        # current one for the same league.
+        st.session_state.league_service = get_league_service(svc.get_current_code())
     if "current_page" not in st.session_state:
         st.session_state.current_page = "Home"
     if "last_league" not in st.session_state:
@@ -87,11 +96,9 @@ def init_session_state():
         teams = st.session_state.league_service.get_teams()
         fav = st.query_params.get("fav") or prefs.get("favourite_team")
         st.session_state.favourite_team = fav if fav in teams else None
-    if "startup_prewarm" not in st.session_state:
-        # Once per session: pull the latest results for every league and refit
-        # prediction models on a daemon thread — never blocks the UI.
-        st.session_state.startup_prewarm = True
-        prewarm_all_services()
+    # Starts the shared warm-up/refresh thread on first call in the process;
+    # every later call (any session) is a no-op.
+    prewarm_all_services()
 
 
 def _default_league_code() -> str:
