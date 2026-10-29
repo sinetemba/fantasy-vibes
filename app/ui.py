@@ -790,11 +790,19 @@ def match_card_html(
         ).strip()
     if prediction:
         expected = prediction.get("expected_goals") or {}
-        extras += prediction_summary_html(prediction, home_team, away_team)
-        extras += (
-            f"<div style='font-size:0.75rem;color:#a0a0a0;margin-top:0.2rem;'>"
-            f"Expected goals: {expected.get('home', 0):.1f} – {expected.get('away', 0):.1f}</div>"
-        )
+        extras += dedent(
+            f"""
+            <details style="margin-top:0.5rem; border-top:1px solid #2c3e50; padding-top:0.5rem;">
+                <summary style="cursor:pointer; font-size:0.85rem; font-weight:700; color:#00ff85;">
+                    🔮 Prediction
+                </summary>
+                {prediction_summary_html(prediction, home_team, away_team)}
+                <div style='font-size:0.75rem;color:#a0a0a0;margin-top:0.2rem;'>
+                    Expected goals: {expected.get('home', 0):.1f} – {expected.get('away', 0):.1f}
+                </div>
+            </details>
+            """
+        ).strip()
 
     return dedent(
         f"""
