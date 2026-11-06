@@ -35,7 +35,7 @@ def _render_favourite_team(service: LeagueService, team: str):
         form = service.get_team_form(team, n=5)
         if form:
             for m in form:
-                date = m.get("date", "")[:10]
+                date = (m.get("date") or "")[:10]
                 st.caption(f"{date} {m.get('venue', '')} vs {m.get('opponent', '')} {m.get('score', '')} ({m.get('result', '')})")
         else:
             st.caption("No recent form data.")
@@ -43,7 +43,7 @@ def _render_favourite_team(service: LeagueService, team: str):
     upcoming = [
         m
         for m in service.get_matches()
-        if is_upcoming(m) and (m["home_team"] == team or m["away_team"] == team)
+        if is_upcoming(m) and (m.get("home_team") == team or m.get("away_team") == team)
     ]
     if upcoming:
         upcoming.sort(key=lambda m: m.get("date") or "z")
@@ -56,8 +56,8 @@ def _render_favourite_team(service: LeagueService, team: str):
             kickoff = ""
         st.markdown(
             match_card_html(
-                next_match["home_team"],
-                next_match["away_team"],
+                next_match.get("home_team", ""),
+                next_match.get("away_team", ""),
                 next_match.get("home_score"),
                 next_match.get("away_score"),
                 next_match.get("status", "scheduled"),
@@ -68,8 +68,8 @@ def _render_favourite_team(service: LeagueService, team: str):
             unsafe_allow_html=True,
         )
         if st.button("🔮 Predict this match", use_container_width=True, key="fav_predict"):
-            st.session_state["pred_home"] = next_match["home_team"]
-            st.session_state["pred_away"] = next_match["away_team"]
+            st.session_state["pred_home"] = next_match.get("home_team")
+            st.session_state["pred_away"] = next_match.get("away_team")
             st.session_state.current_page = "Predictions"
             st.rerun()
     else:
@@ -167,7 +167,7 @@ def render(service: LeagueService):
     upcoming = [m for m in matches if is_upcoming(m)]
     if upcoming:
         st.markdown("### 📅 Next Fixture")
-        next_match = upcoming[0]
+        next_match = min(upcoming, key=lambda m: m.get("date") or "")
         try:
             dt = datetime.fromisoformat(next_match.get("date")) if next_match.get("date") else None
             fixture_time = dt.strftime("%a, %d %b %Y %H:%M") if dt else ""
@@ -175,8 +175,8 @@ def render(service: LeagueService):
             fixture_time = ""
         st.markdown(
             match_card_html(
-                next_match["home_team"],
-                next_match["away_team"],
+                next_match.get("home_team", ""),
+                next_match.get("away_team", ""),
                 next_match.get("home_score"),
                 next_match.get("away_score"),
                 next_match.get("status", "scheduled"),

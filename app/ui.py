@@ -290,13 +290,20 @@ def prediction_reasons(pred: Dict, home: Optional[str] = None, away: Optional[st
     inputs = pred.get("model_inputs") or {}
 
     def _fmt(team: str, info: Dict) -> str:
+        def _num(v):
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
         parts = []
-        pos, league = info.get("position"), info.get("context_league")
+        pos, league = _num(info.get("position")), info.get("context_league")
         if pos and league:
             parts.append(f"{_ordinal(int(pos))} in {league_name(league)}")
-        if info.get("form_ppg") is not None:
-            parts.append(f"{info['form_ppg']:.1f} pts/game (last 10)")
-        comp_ppg, comp = info.get("comp_form_ppg"), info.get("competition")
+        form_ppg = _num(info.get("form_ppg"))
+        if form_ppg is not None:
+            parts.append(f"{form_ppg:.1f} pts/game (last 10)")
+        comp_ppg, comp = _num(info.get("comp_form_ppg")), info.get("competition")
         if comp_ppg is not None and comp and comp != league:
             parts.append(f"{comp_ppg:.1f} pts/game in {league_name(comp)}")
         return f"{team} " + ", ".join(parts) if parts else ""
@@ -658,13 +665,20 @@ def show_error_message(message: str):
 
 
 def create_scoreline_chart(prob_matrix: np.ndarray, max_goals: int = 5) -> go.Figure:
-    matrix = prob_matrix[: max_goals + 1, : max_goals + 1]
-    text = [[f"{matrix[i][j]*100:.1f}%" for j in range(max_goals + 1)] for i in range(max_goals + 1)]
+    try:
+        m = np.asarray(prob_matrix, dtype=float)
+    except (TypeError, ValueError):
+        m = np.zeros((0, 0))
+    if m.ndim != 2:
+        m = np.zeros((0, 0))
+    rows, cols = min(m.shape[0], max_goals + 1), min(m.shape[1], max_goals + 1)
+    matrix = m[:rows, :cols]
+    text = [[f"{matrix[i][j]*100:.1f}%" for j in range(cols)] for i in range(rows)]
     fig = go.Figure(
         data=go.Heatmap(
             z=matrix * 100,
-            x=[str(i) for i in range(max_goals + 1)],
-            y=[str(i) for i in range(max_goals + 1)],
+            x=[str(i) for i in range(cols)],
+            y=[str(i) for i in range(rows)],
             colorscale="Greens",
             text=text,
             texttemplate="%{text}",

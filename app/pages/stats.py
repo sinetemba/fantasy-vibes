@@ -8,6 +8,7 @@ from app.ui import (
     apply_theme,
     display_disclaimer,
     display_header,
+    safe_html,
     show_info_message,
 )
 from src.data import LeagueService
@@ -45,14 +46,14 @@ def _render_form(service: LeagueService):
         return
 
     for f in form:
-        color = {"W": "#00ff85", "D": "#f1c40f", "L": "#e74c3c"}.get(f["result"], "#a0a0a0")
+        color = {"W": "#00ff85", "D": "#f1c40f", "L": "#e74c3c"}.get(f.get("result"), "#a0a0a0")
         st.markdown(
             f"""
             <div style="display:flex; justify-content:space-between; align-items:center; padding:0.5rem; background:#1f2833; border-radius:8px; margin:0.3rem 0;">
-                <span style="font-weight:700; color:{color};">{f['result']}</span>
-                <span style="color:#f5f6f7;">{f['venue']} · {f['opponent']}</span>
-                <span style="color:#a0a0a0;">{f['score']}</span>
-                <span style="color:#a0a0a0; font-size:0.75rem;">{f['date'][:10] if f['date'] else ''}</span>
+                <span style="font-weight:700; color:{color};">{safe_html(f.get('result', ''))}</span>
+                <span style="color:#f5f6f7;">{safe_html(f.get('venue', ''))} · {safe_html(f.get('opponent', ''))}</span>
+                <span style="color:#a0a0a0;">{safe_html(f.get('score', ''))}</span>
+                <span style="color:#a0a0a0; font-size:0.75rem;">{(f.get('date') or '')[:10]}</span>
             </div>
             """,
             unsafe_allow_html=True,
@@ -76,10 +77,10 @@ def _render_h2h(service: LeagueService):
     st.markdown(
         f"""
         <div style="display:flex; justify-content:space-around; padding:1rem; background:#1f2833; border-radius:12px; margin:1rem 0;">
-            <div style="text-align:center;"><div style="font-size:1.5rem; font-weight:800; color:#00ff85;">{record['a_wins']}</div><div>{a} wins</div></div>
-            <div style="text-align:center;"><div style="font-size:1.5rem; font-weight:800; color:#f1c40f;">{record['draws']}</div><div>Draws</div></div>
-            <div style="text-align:center;"><div style="font-size:1.5rem; font-weight:800; color:#e74c3c;">{record['b_wins']}</div><div>{b} wins</div></div>
-            <div style="text-align:center;"><div style="font-size:1.5rem; font-weight:800;">{record['a_gf']}:{record['a_ga']}</div><div>Goals ({a}:{b})</div></div>
+            <div style="text-align:center;"><div style="font-size:1.5rem; font-weight:800; color:#00ff85;">{record.get('a_wins', 0)}</div><div>{safe_html(a)} wins</div></div>
+            <div style="text-align:center;"><div style="font-size:1.5rem; font-weight:800; color:#f1c40f;">{record.get('draws', 0)}</div><div>Draws</div></div>
+            <div style="text-align:center;"><div style="font-size:1.5rem; font-weight:800; color:#e74c3c;">{record.get('b_wins', 0)}</div><div>{safe_html(b)} wins</div></div>
+            <div style="text-align:center;"><div style="font-size:1.5rem; font-weight:800;">{record.get('a_gf', 0)}:{record.get('a_ga', 0)}</div><div>Goals ({safe_html(a)}:{safe_html(b)})</div></div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -88,7 +89,10 @@ def _render_h2h(service: LeagueService):
     if matches:
         st.markdown("#### Recent meetings")
         for m in list(reversed(matches))[:5]:
-            st.markdown(f"{m['home_team']} {m['home_score']}-{m['away_score']} {m['away_team']} · {m['date'][:10] if m['date'] else ''}")
+            st.markdown(
+                f"{m.get('home_team', '?')} {m.get('home_score', '?')}-{m.get('away_score', '?')} "
+                f"{m.get('away_team', '?')} · {(m.get('date') or '')[:10]}"
+            )
 
 
 def _render_trends(service: LeagueService):
@@ -99,6 +103,9 @@ def _render_trends(service: LeagueService):
         return
 
     df = pd.DataFrame(standings)
+    if not {"goals_for", "points", "team"} <= set(df.columns):
+        show_info_message("Standings data is missing goal/point columns for this league.")
+        return
     fig = px.scatter(
         df,
         x="goals_for",

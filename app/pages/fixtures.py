@@ -1,5 +1,6 @@
 """Fixtures page with filters and per-match predictions."""
 
+import logging
 from datetime import date, datetime, timedelta
 from itertools import groupby
 from typing import Any, Dict, List
@@ -20,6 +21,8 @@ from app.ui import (
 )
 from src.data import LeagueService
 from src.data.utils import is_upcoming, sast_now
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_date(m: Dict[str, Any]) -> date:
@@ -138,13 +141,21 @@ def _render_filters(matches: List[Dict[str, Any]], service: LeagueService):
             all_scheduled = [m for m in filtered if m.get("status") == "scheduled"]
             to_predict = all_scheduled[:MAX_BATCH_PREDICTIONS]
             with st.spinner(f"Predicting {len(to_predict)} fixtures..."):
+                failed = 0
                 for m in to_predict:
-                    pred = service.predict_fixture(m)
+                    try:
+                        pred = service.predict_fixture(m)
+                    except Exception as exc:
+                        logger.warning(f"Prediction failed for {m.get('match_id')}: {exc}")
+                        failed += 1
+                        continue
                     pred["predicted_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    predictions[m["match_id"]] = pred
-            msg = f"Predicted {len(to_predict)} displayed matches"
+                    predictions[m.get("match_id")] = pred
+            msg = f"Predicted {len(to_predict) - failed} of {len(to_predict)} displayed matches"
             if len(all_scheduled) > MAX_BATCH_PREDICTIONS:
                 msg += f" (capped at {MAX_BATCH_PREDICTIONS})"
+            if failed:
+                msg += f" — {failed} failed"
             st.success(msg)
 
     if st.session_state["fixture_predictions"]:
@@ -200,10 +211,12 @@ def _apply_filters(matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def _render_fixture(service: LeagueService, m: Dict[str, Any]):
-    fixture_id = m["match_id"]
+    fixture_id = m.get("match_id") or (
+        f"{m.get('home_team', '')}_{m.get('away_team', '')}_{(m.get('date') or '')[:10]}"
+    )
     predictions = st.session_state["fixture_predictions"]
-    home = m["home_team"]
-    away = m["away_team"]
+    home = m.get("home_team", "?")
+    away = m.get("away_team", "?")
 
     c_info, c_match, c_action = st.columns([1.4, 2.6, 1.2])
 
@@ -222,20 +235,32 @@ def _render_fixture(service: LeagueService, m: Dict[str, Any]):
         )
 
     with c_match:
-        if m.get("status") == "full_time" and m.get("home_score") is not None:
+        if (
+            m.get("status") == "full_time"
+            and m.get("home_score") is not None
+            and m.get("away_score") is not None
+        ):
             st.markdown(f"{home} {m['home_score']}-{m['away_score']} {away}")
         else:
             st.markdown(f"{home} vs {away}")
         st.caption(f"Source: {m.get('source', 'unknown')}")
+        if m.get("postponed_reason"):
+            st.caption(f"⚠️ {m['postponed_reason']}")
 
     with c_action:
         if m.get("status") == "full_time":
             st.caption("Completed")
+        elif m.get("status") in ("postponed", "cancelled"):
+            st.caption(m["status"].capitalize())
         elif st.button("🔮 Predict", key=f"predict_{fixture_id}", use_container_width=True):
-            pred = service.predict_fixture(m)
-            pred["predicted_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            predictions[fixture_id] = pred
-            st.rerun()
+            try:
+                pred = service.predict_fixture(m)
+            except Exception as exc:
+                st.error(f"Prediction failed: {exc}")
+            else:
+                pred["predicted_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                predictions[fixture_id] = pred
+                st.rerun()
 
     if fixture_id in predictions:
         _render_prediction_summary(predictions[fixture_id], home, away, service=service)

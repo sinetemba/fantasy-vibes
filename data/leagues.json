@@ -98,6 +98,9 @@
       "league_id": "4802",
       "season": "2026-2027"
     },
+    "postponements": [
+      { "date": "2026-11-04", "reason": "Postponed — South African election day" }
+    ],
     "zones": { "qualification": 2, "relegation": 1 }
   },
   "CL": {

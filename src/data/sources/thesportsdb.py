@@ -23,7 +23,7 @@ STATUS_MAP = {
 
 
 def _api_key() -> str:
-    return os.getenv("THESPORTSDB_API_KEY") or "3"
+    return os.getenv("THESPORTSDB_API_KEY") or "123"
 
 
 def _normalize_team(name: str) -> str:

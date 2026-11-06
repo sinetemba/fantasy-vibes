@@ -19,7 +19,7 @@ from .prediction_engine import (
     fixtures_equivalent,
 )
 from . import prediction_log
-from .utils import compute_table, sast_now
+from .utils import apply_postponements, compute_table, sast_now, stale_served_since
 from .sources.bbc import BBCSource
 from .sources.composite import CompositeDataSource
 from .sources.fixture_download import FixtureDownloadSource
@@ -218,6 +218,9 @@ class LeagueService:
         self._match_source_name = None
         # Wall-clock time of the last successful data swap, for freshness UI.
         self.last_refreshed: Optional[float] = None
+        # True when the last fetch had to serve expired cache — the data is
+        # older than its TTL implies and the UI should say so.
+        self.data_stale = False
         self._standings_source_name = None
         self._engine = PredictionEngine()
         # Services are shared across sessions and threads. Writers (warm-up,
@@ -247,6 +250,7 @@ class LeagueService:
         model. `refit` retrains even when a fresh persisted model exists."""
         with self._lock:
             league = self._current_league
+            fetch_started = time.time()
 
             # Matches and standings use disjoint provider lists, so they
             # fetch in parallel. Historical pulls depend on which source won
@@ -262,6 +266,7 @@ class LeagueService:
 
             if league.get("senior_only"):
                 matches = _senior_teams_only(matches)
+            matches = apply_postponements(matches, league)
             # Fallback to a live table computed from results if no source provides standings.
             if not standings and matches and not league.get("no_table"):
                 standings_source = "computed"
@@ -301,6 +306,7 @@ class LeagueService:
             self._form_index = None
             self._group_match_cache.clear()
             self.last_refreshed = time.time()
+            self.data_stale = bool(stale_served_since(fetch_started))
 
     def _fetch_historical(self, match_source: Optional[str]) -> List[Dict[str, Any]]:
         """Pull configured historical/archived seasons as extra training data."""
@@ -360,6 +366,7 @@ class LeagueService:
                 matches = []
             if cfg.get("senior_only"):
                 matches = _senior_teams_only(matches)
+            matches = apply_postponements(matches, cfg)
             for m in matches:
                 m["competition"] = code
             try:
@@ -466,6 +473,7 @@ class LeagueService:
         prediction model are untouched. Pairs with utils.bust_live_cache()
         so the fetch bypasses the HTTP TTL and picks up live scores."""
         with self._lock:
+            fetch_started = time.time()
             try:
                 matches, match_source = self._source.get_matches_with_source(
                     self._current_league
@@ -477,6 +485,7 @@ class LeagueService:
                 return
             if self._current_league.get("senior_only"):
                 matches = _senior_teams_only(matches)
+            matches = apply_postponements(matches, self._current_league)
             for m in matches:
                 m.setdefault("competition", self._current_code)
             prev_ft = {
@@ -514,6 +523,7 @@ class LeagueService:
             self._form_index = None
             self._group_match_cache.clear()
             self.last_refreshed = time.time()
+            self.data_stale = bool(stale_served_since(fetch_started))
 
     def _apply_results_to_standings(
         self, standings: List[Dict[str, Any]], results: List[Dict[str, Any]]
@@ -636,6 +646,7 @@ class LeagueService:
                 return []
             if cfg.get("senior_only"):
                 league_matches = _senior_teams_only(league_matches)
+            league_matches = apply_postponements(league_matches, cfg)
             for m in league_matches:
                 m["competition"] = code
                 m["competition_name"] = cfg.get("name", code)

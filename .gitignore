@@ -8,6 +8,8 @@ __pycache__/
 .mypy_cache/
 .vscode/
 .idea/
+.claude/
+.tokensave/
 data/cache/*.json
 
 # Script output redirected to the repo root (backtest/tune/retrain runs)

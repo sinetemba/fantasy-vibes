@@ -103,7 +103,7 @@ def render(service: LeagueService):
             1
             for m in filtered
             if _predictable(m)
-            and m["match_id"] not in st.session_state["intl_predictions"]
+            and m.get("match_id") not in st.session_state["intl_predictions"]
         )
         st.caption(f"{len(filtered)} matches · {pending} awaiting prediction")
     with c_btn:
@@ -216,7 +216,7 @@ def _predict_all(matches: List[Dict[str, Any]]) -> None:
     pending = [
         m
         for m in matches
-        if _predictable(m) and m["match_id"] not in predictions
+        if _predictable(m) and m.get("match_id") not in predictions
     ]
     if not pending:
         return
@@ -227,20 +227,22 @@ def _predict_all(matches: List[Dict[str, Any]]) -> None:
         try:
             pred = _service_for(m["competition"]).predict_fixture(m)
             pred["predicted_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            predictions[m["match_id"]] = pred
+            predictions[m.get("match_id")] = pred
         except Exception as exc:
-            logger.warning(f"Prediction failed for {m['match_id']}: {exc}")
+            logger.warning(f"Prediction failed for {m.get('match_id')}: {exc}")
         progress.progress(
             (i + 1) / total,
-            text=f"Predicted {m['home_team']} v {m['away_team']}",
+            text=f"Predicted {m.get('home_team', '?')} v {m.get('away_team', '?')}",
         )
     progress.empty()
 
 
 def _render_match(m: Dict[str, Any]):
-    home = m["home_team"]
-    away = m["away_team"]
-    fixture_id = m["match_id"]
+    home = m.get("home_team", "?")
+    away = m.get("away_team", "?")
+    fixture_id = m.get("match_id") or (
+        f"{home}_{away}_{(m.get('date') or '')[:10]}"
+    )
     predictions = st.session_state["intl_predictions"]
 
     c_info, c_match, c_action = st.columns([1.4, 2.6, 1.2])
@@ -260,7 +262,11 @@ def _render_match(m: Dict[str, Any]):
         )
 
     with c_match:
-        if m.get("status") == "full_time" and m.get("home_score") is not None:
+        if (
+            m.get("status") == "full_time"
+            and m.get("home_score") is not None
+            and m.get("away_score") is not None
+        ):
             st.markdown(f"{home} {m['home_score']}-{m['away_score']} {away}")
         else:
             st.markdown(f"{home} vs {away}")
@@ -281,7 +287,7 @@ def _render_match(m: Dict[str, Any]):
 
     if fixture_id in predictions:
         try:
-            comp_service = _service_for(m["competition"]) if m.get("competition") else None
+            comp_service = _service_for(m.get("competition")) if m.get("competition") else None
         except Exception:
             comp_service = None
         _render_prediction_summary(

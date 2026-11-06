@@ -26,7 +26,7 @@ from src.data.sources.football_data import FootballDataSource
 from src.data.sources.openfootball import OpenfootballSource
 from src.data.sources.psl_scraper import PSLScraperSource
 from src.data.sources.thesportsdb import TheSportsDBSource
-from src.data.utils import bust_live_cache, sast_now
+from src.data.utils import apply_postponements, bust_live_cache, sast_now
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,18 @@ def _match_date(m: Dict[str, Any]) -> date:
         return datetime.fromisoformat(m["date"]).date()
     except Exception:
         return date.min
+
+
+def _apply_league_postponements(
+    fixtures: List[Dict[str, Any]], leagues: Dict[str, Dict[str, Any]]
+) -> None:
+    """Apply configured fixture call-offs (e.g. election-day postponements)
+    to each league's rows in place — feeds usually still list them as scheduled."""
+    by_code: Dict[Optional[str], List[Dict[str, Any]]] = {}
+    for m in fixtures:
+        by_code.setdefault(m.get("league_code"), []).append(m)
+    for code, rows in by_code.items():
+        apply_postponements(rows, leagues.get(code) or {})
 
 
 def _dedupe_fixtures(fixtures: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -182,6 +194,8 @@ def _load_todays_fixtures(today: str) -> List[Dict[str, Any]]:
         for rows in pool.map(_league_rows, cascade_entries):
             fixtures.extend(rows)
 
+    _apply_league_postponements(fixtures, leagues)
+
     if fixtures:
         # Dedupe across sources: feeds disagree on name spelling
         # ("Man City" vs "Manchester City", "Fenerbahçe" vs "Fenerbahce")
@@ -207,6 +221,7 @@ def _load_todays_fixtures(today: str) -> List[Dict[str, Any]]:
             row["league_code"] = code
             row["league_name"] = name
             fallback.append(row)
+    _apply_league_postponements(fallback, leagues)
     fallback = _dedupe_fixtures(fallback)
     fallback.sort(key=lambda m: (m["league_name"], m.get("date") or ""))
     return fallback
@@ -395,7 +410,9 @@ def _render_match(m: Dict[str, Any], predictions: Optional[Dict[str, Any]] = Non
             m.get("away_score"),
             m.get("status", "scheduled"),
             str(minutes),
-            round_label=m.get("round", ""),
+            round_label=" · ".join(
+                p for p in (m.get("round", ""), m.get("postponed_reason", "")) if p
+            ),
             time=time,
             venue=m.get("venue") or "",
             prediction=pred,

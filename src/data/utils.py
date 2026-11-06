@@ -72,7 +72,7 @@ def _cache_lock(key: str) -> threading.Lock:
 
 # Only genuine cache artifacts are prunable — never user state like
 # preferences.json or persisted model files.
-_PRUNABLE = re.compile(r"^[0-9a-f]{64}\.(json|txt)$")
+_PRUNABLE = re.compile(r"^[0-9a-f]{64}\.(json|txt)(\.neg)?$")
 
 
 def prune_cache(max_age_seconds: int = CACHE_MAX_AGE) -> int:
@@ -118,6 +118,55 @@ def cache_ttl(ttl_seconds: int) -> int:
     if time.time() < _LIVE_WINDOW_UNTIL:
         return min(ttl_seconds, LIVE_TTL)
     return ttl_seconds
+
+
+# Failed fetches write a .neg marker file instead of a cache entry, so a
+# dead or rate-limited provider isn't re-hit on every rerun. The marker
+# TTL collapses inside a live-refresh window just like data TTLs.
+NEGATIVE_TTL = 90
+_RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
+_MAX_ATTEMPTS = 3
+_RETRY_BACKOFF = 1.5
+# Cap on honored Retry-After — a page render shouldn't stall on a
+# provider's full cooldown.
+_RETRY_AFTER_CAP = 8.0
+
+# URLs served from expired cache after a failed refetch, timestamped —
+# lets callers flag that their data is older than the TTL implies.
+_STALE_SERVED: Dict[str, float] = {}
+_STALE_GUARD = threading.Lock()
+
+
+def stale_served_since(ts: float) -> List[str]:
+    """URLs served from expired cache since `ts` (refetches that failed)."""
+    with _STALE_GUARD:
+        return [u for u, t in _STALE_SERVED.items() if t >= ts]
+
+
+def _neg_marker(cache_path: Path) -> Path:
+    return cache_path.with_name(cache_path.name + ".neg")
+
+
+def _transient(exc: Exception) -> bool:
+    """True for failures worth retrying: rate limits, server errors, and
+    connection/timeout issues. Not auth failures or bad payloads."""
+    if isinstance(exc, requests.exceptions.HTTPError):
+        resp = exc.response
+        return resp is not None and resp.status_code in _RETRYABLE_STATUSES
+    return isinstance(
+        exc, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)
+    )
+
+
+def _retry_delay(response: Optional[requests.Response], attempt: int) -> float:
+    if response is not None:
+        try:
+            return min(
+                float(response.headers.get("Retry-After") or 0), _RETRY_AFTER_CAP
+            )
+        except (TypeError, ValueError):
+            pass
+    return min(_RETRY_BACKOFF * (2 ** attempt), _RETRY_AFTER_CAP)
 
 
 prune_cache()
@@ -175,21 +224,46 @@ def cached_get(
             except Exception:
                 pass
 
-        try:
-            response = _session().get(url, headers=headers, timeout=timeout)
-            response.raise_for_status()
-            data = response.text if raw else response.json()
-            _write_cache(cache_path, data, raw)
-            return data
-        except Exception as exc:
-            logger.warning(f"Failed to fetch {url}: {exc}")
-            # Serve stale cache if it exists
-            if cache_path.exists():
+        marker = _neg_marker(cache_path)
+        if _is_cache_valid(marker, cache_ttl(NEGATIVE_TTL)):
+            logger.debug(f"Skipping {url}: recent failure still fresh")
+        else:
+            for attempt in range(_MAX_ATTEMPTS):
+                response = None
                 try:
-                    with open(cache_path, "r", encoding="utf-8") as f:
-                        return f.read() if raw else json.load(f)
-                except Exception:
-                    pass
+                    response = _session().get(url, headers=headers, timeout=timeout)
+                    if (
+                        response.status_code in _RETRYABLE_STATUSES
+                        and attempt + 1 < _MAX_ATTEMPTS
+                    ):
+                        time.sleep(_retry_delay(response, attempt))
+                        continue
+                    response.raise_for_status()
+                    data = response.text if raw else response.json()
+                    _write_cache(cache_path, data, raw)
+                    marker.unlink(missing_ok=True)
+                    return data
+                except Exception as exc:
+                    if attempt + 1 < _MAX_ATTEMPTS and _transient(exc):
+                        time.sleep(_retry_delay(response, attempt))
+                        continue
+                    logger.warning(f"Failed to fetch {url}: {exc}")
+                    break
+            try:
+                marker.touch()
+            except Exception:
+                pass
+        if cache_path.exists():
+            # Serve stale cache if it exists — and record it so callers can
+            # flag that the data is older than its TTL implies.
+            try:
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    data = f.read() if raw else json.load(f)
+                with _STALE_GUARD:
+                    _STALE_SERVED[url] = time.time()
+                return data
+            except Exception:
+                pass
     return None
 
 
@@ -198,7 +272,7 @@ def clear_cache() -> int:
     URL-cache files are touched — persisted models, the retrain report and
     preferences live in the same directory and must survive."""
     removed = 0
-    for f in CACHE_DIR.glob("*.json"):
+    for f in CACHE_DIR.glob("*"):
         try:
             if not _PRUNABLE.match(f.name):
                 continue
@@ -259,7 +333,11 @@ def compute_table(matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         all_teams.add(home)
         all_teams.add(away)
 
-        if m.get("status") != "full_time" or m.get("home_score") is None:
+        if (
+            m.get("status") != "full_time"
+            or m.get("home_score") is None
+            or m.get("away_score") is None
+        ):
             continue
 
         for team, gf, ga in [
@@ -326,6 +404,32 @@ def is_upcoming(m: Any) -> bool:
         return datetime.fromisoformat(m["date"]).date() >= sast_now().date()
     except Exception:
         return False
+
+
+def apply_postponements(
+    matches: List[Dict[str, Any]], league_config: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """Mark configured fixture dates as postponed in place — for known
+    call-offs (election days, weather, security) ahead of the feed updating.
+    league_config["postponements"] entries are {"date": "YYYY-MM-DD",
+    "reason": str}; plain "YYYY-MM-DD" strings also work. Only unfinished
+    matches are flipped; the reason rides on the row so the UI can show why."""
+    rules: Dict[str, str] = {}
+    for entry in league_config.get("postponements") or []:
+        if isinstance(entry, str):
+            rules[entry] = ""
+        elif isinstance(entry, dict) and entry.get("date"):
+            rules[entry["date"]] = entry.get("reason") or ""
+    if not rules:
+        return matches
+    for m in matches:
+        day = (m.get("date") or "")[:10]
+        if day not in rules or m.get("status") in ("full_time", "live", "half_time"):
+            continue
+        m["status"] = "postponed"
+        m["postponed_reason"] = rules[day]
+        m["minutes_elapsed"] = "Postponed"
+    return matches
 
 
 def sast_now() -> datetime:

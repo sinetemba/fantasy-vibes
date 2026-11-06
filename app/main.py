@@ -250,6 +250,8 @@ def render_sidebar():
 
         # Freshness, not provider names — those are listed on the About page.
         st.caption(f"🕒 Data updated {_updated_ago(getattr(service, 'last_refreshed', None))}")
+        if getattr(service, "data_stale", False):
+            st.caption("⚠️ A data feed is down — showing cached results.")
 
         st.markdown("---")
         st.caption(
@@ -292,6 +294,8 @@ def render_page():
     except Exception as e:
         logger.error(f"Error rendering {page}: {e}", exc_info=True)
         st.error(f"Could not load the {page} page. Please refresh.")
+        with st.expander("Error details"):
+            st.exception(e)
 
 
 def main():
