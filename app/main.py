@@ -81,9 +81,14 @@ def _save_preferences():
 
 
 def init_session_state():
+    # Starts the shared warm-up/refresh thread on first call in the
+    # process — kicked off before the (blocking) default-service build so
+    # background warm-up overlaps it; every later call is a no-op.
+    prewarm_all_services()
     svc = st.session_state.get("league_service")
     if svc is None:
-        st.session_state.league_service = get_league_service(_default_league_code())
+        with st.spinner("Loading league data…"):
+            st.session_state.league_service = get_league_service(_default_league_code())
     elif not is_current_service(svc):
         # Session holds a service from before a code reload — swap in a
         # current one for the same league.
@@ -104,9 +109,6 @@ def init_session_state():
         if fav and fav in service.get_teams():
             favs[service.get_current_code()] = fav
         st.session_state.favourite_teams = favs
-    # Starts the shared warm-up/refresh thread on first call in the process;
-    # every later call (any session) is a no-op.
-    prewarm_all_services()
 
 
 def _default_league_code() -> str:

@@ -869,7 +869,9 @@ class PredictionEngine:
                 "home": self._describe_inputs(home_team, competition, home_ctx),
                 "away": self._describe_inputs(away_team, competition, away_ctx),
             },
-            "score_matrix": np.array(matrix),
+            # Nested lists, not np.array: predictions accumulate in session
+            # state, so keep the payload plain and small.
+            "score_matrix": np.asarray(matrix).round(4).tolist(),
             "last_trained": self.last_trained,
             "data_as_of": self.data_as_of,
             "matches_used": self.matches_used,
@@ -1009,7 +1011,7 @@ class PredictionEngine:
                          "position": None, "league_size": None, "table_ppg": None,
                          "context_league": None},
             },
-            "score_matrix": np.array(matrix),
+            "score_matrix": np.asarray(matrix).round(4).tolist(),
             "last_trained": self.last_trained,
             "data_as_of": self.data_as_of,
             "matches_used": self.matches_used,

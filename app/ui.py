@@ -60,12 +60,34 @@ BACKGROUND_REFRESH_SECONDS = 1800
 
 def _refresh_loop() -> None:
     """Warm every configured league (dropdown + international group), then
-    fully reload and refit each one every BACKGROUND_REFRESH_SECONDS. One
-    sequential thread so it never blocks the UI or hammers providers;
-    services swap new state in atomically, so readers keep the old data
-    until a reload finishes."""
+    reload each one every BACKGROUND_REFRESH_SECONDS. The first pass runs
+    a few workers in parallel so a cold start covers all leagues sooner;
+    steady-state passes stay sequential and provider-polite. Services
+    swap new state in atomically, so readers keep the old data until a
+    reload finishes."""
+    from concurrent.futures import ThreadPoolExecutor
+
     from src.data.league_service import _leagues_registry
     from src.data.utils import bust_live_cache
+
+    def _pass(code: str, first: bool) -> None:
+        try:
+            svc = get_league_service(code)
+            if first:
+                # A cached service may hold stale in-memory matches — pull
+                # fresh ones before refitting so the model trains on the
+                # latest results, not just a stale model file.
+                svc.refresh_live_matches()
+                svc.refit_model()
+            else:
+                # No forced refit — refresh() skips the retrain when the
+                # results the model was trained on are unchanged.
+                svc.refresh()
+            # Score finished fixtures and log the coming week's
+            # predictions for the accuracy report.
+            svc.track_predictions()
+        except Exception as exc:
+            logger.warning(f"Background refresh failed for {code}: {exc}")
 
     first = True
     while True:
@@ -76,24 +98,12 @@ def _refresh_loop() -> None:
             leagues = _leagues_registry()
             codes = [c for c, cfg in leagues.items() if not cfg.get("group")]
             codes += [c for c, cfg in leagues.items() if cfg.get("group")]
-            for code in codes:
-                try:
-                    svc = get_league_service(code)
-                    if first:
-                        # A cached service may hold stale in-memory matches —
-                        # pull fresh ones before refitting so the model trains
-                        # on the latest results, not just a stale model file.
-                        svc.refresh_live_matches()
-                        svc.refit_model()
-                    else:
-                        # No forced refit — refresh() skips the retrain when
-                        # the results the model was trained on are unchanged.
-                        svc.refresh()
-                    # Score finished fixtures and log the coming week's
-                    # predictions for the accuracy report.
-                    svc.track_predictions()
-                except Exception as exc:
-                    logger.warning(f"Background refresh failed for {code}: {exc}")
+            if first:
+                with ThreadPoolExecutor(max_workers=3) as pool:
+                    list(pool.map(lambda c: _pass(c, True), codes))
+            else:
+                for code in codes:
+                    _pass(code, False)
         except Exception as exc:
             logger.warning(f"Background refresh pass failed: {exc}")
         first = False
