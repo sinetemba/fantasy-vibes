@@ -2,7 +2,11 @@
 
 import unittest
 
-from src.data.prediction_engine import PredictionEngine
+from src.data.prediction_engine import (
+    DRAW_FLOOR,
+    PredictionEngine,
+    _draw_prob,
+)
 
 
 class TestPredictionEngine(unittest.TestCase):
@@ -326,6 +330,34 @@ class TestPredictionEngine(unittest.TestCase):
             ba["outcome_probabilities"]["away_win"],
             delta=0.02,
         )
+
+    def test_draw_prob_scales_below_floor(self):
+        """A heavy mismatch should price the draw near the (low) floor,
+        not at a flat ~20% — tight games keep the learned rate."""
+        self.assertAlmostEqual(_draw_prob(0, 0.25), 0.25)
+        self.assertAlmostEqual(_draw_prob(1100, 0.30), DRAW_FLOOR)
+        self.assertLess(_draw_prob(1100, 0.30), 0.11)
+
+    def test_form_factor_measures_delta_vs_season(self):
+        """Form at the season baseline → no adjustment; a hot run only
+        counts the gap, since table PPG is already priced by context."""
+        engine = PredictionEngine()
+        engine.form_ppg = {"Team A": 0.8}  # 2.4 pts/game recently
+        engine.comp_form_ppg = {}
+        self.assertAlmostEqual(engine._form_factor("Team A", ctx={"ppg": 2.4}), 1.0)
+        self.assertGreater(engine._form_factor("Team A", ctx={"ppg": 1.2}), 1.0)
+        # No context → old behaviour (baseline is the 1.5 pts/game average).
+        self.assertGreater(engine._form_factor("Team A"), 1.0)
+
+    def test_naive_dates_parsed_as_sast(self):
+        """Feeds store naive SAST kickoffs — fit() converts to true UTC,
+        so the newest-result stamp sits 2h behind the raw string."""
+        engine = PredictionEngine()
+        engine.fit([{
+            "status": "full_time", "home_team": "H", "away_team": "A",
+            "home_score": 1, "away_score": 0, "date": "2026-08-01T15:00:00",
+        }])
+        self.assertEqual(engine.data_as_of, "2026-08-01T13:00:00+00:00")
 
     def test_ambiguous_prefix_names_stay_separate(self):
         engine = PredictionEngine()

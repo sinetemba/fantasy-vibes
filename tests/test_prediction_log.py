@@ -85,6 +85,41 @@ class TestPredictionLog(unittest.TestCase):
         prediction_log._entries = None
         self.assertIn("PL|1", prediction_log._load())
 
+    def _settled(self, n, probs, result_for):
+        """Inject n settled log entries sharing `probs` — the calibration
+        fit only reads settled rows, so they don't need record/settle."""
+        entries = prediction_log._load()
+        for i in range(n):
+            entries[f"PL|{i}"] = {
+                "league": "PL", "match_id": str(i),
+                "home_team": "A", "away_team": "B",
+                "date": (sast_now() - timedelta(days=1)).isoformat(),
+                "predicted_at": sast_now().isoformat(), "model": "x",
+                "p_home": probs[0], "p_draw": probs[1], "p_away": probs[2],
+                "home_score": 1, "away_score": 0, "result": result_for(i),
+            }
+
+    def test_temperature_none_below_sample_floor(self):
+        self._settled(50, (0.5, 0.3, 0.2), lambda i: "home_win")
+        self.assertIsNone(prediction_log.temperature("PL", min_n=120))
+
+    def test_temperature_flags_overconfidence(self):
+        # 50% hits at 90% confidence — the fit should flatten (T > 1).
+        self._settled(
+            150, (0.9, 0.05, 0.05),
+            lambda i: "home_win" if i < 75 else "away_win",
+        )
+        T = prediction_log.temperature("PL", min_n=100)
+        self.assertIsNotNone(T)
+        self.assertGreater(T, 1.0)
+
+    def test_temperature_near_one_when_calibrated(self):
+        self._settled(
+            150, (0.5, 0.3, 0.2),
+            lambda i: "home_win" if i < 75 else ("draw" if i < 120 else "away_win"),
+        )
+        self.assertIsNone(prediction_log.temperature("PL", min_n=100))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -15,6 +15,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Set
 from .prediction_engine import (
     PredictionEngine,
     _norm_key,
+    _rounded_probs,
     _TEAM_KEY_ALIASES,
     fixtures_equivalent,
 )
@@ -271,6 +272,9 @@ class LeagueService:
         self._engine = PredictionEngine()
         # Signature of the results the current engine was trained on.
         self._engine_signature: Optional[int] = None
+        # Temperature fitted on this league's settled prediction log —
+        # rescales outcome probabilities when the model mis-calibrates.
+        self._calibration_T: Optional[float] = None
         # Services are shared across sessions and threads. Writers (warm-up,
         # background refresh, Live refresh, Retrain) serialise on this lock
         # and build new state in locals before swapping it in, so readers
@@ -360,6 +364,10 @@ class LeagueService:
             self._engine = engine
             self._engine_signature = sig
             self._team_contexts = contexts
+            try:
+                self._calibration_T = prediction_log.temperature(self._current_code)
+            except Exception:
+                self._calibration_T = None
             self._form_index = None
             self._group_match_cache.clear()
             self.last_refreshed = time.time()
@@ -1008,9 +1016,27 @@ class LeagueService:
             home: team_contexts.get(home),
             away: team_contexts.get(away),
         }
-        return engine.predict(
+        pred = engine.predict(
             home, away, neutral, competition=self._current_code, contexts=contexts
         )
+        # Calibrate outcome probabilities against this league's settled
+        # log: T > 1 flattens an overconfident model, T < 1 sharpens an
+        # under-confident one. The score matrix stays model-derived.
+        T = getattr(self, "_calibration_T", None)
+        if T:
+            probs = pred.get("outcome_probabilities") or {}
+            scaled = [
+                max(float(probs.get(k) or 0.0), 1e-12) ** (1.0 / T)
+                for k in ("home_win", "draw", "away_win")
+            ]
+            total = sum(scaled)
+            h, d, a = _rounded_probs(*(p / total for p in scaled))
+            pred["outcome_probabilities"] = {
+                "home_win": h,
+                "draw": d,
+                "away_win": a,
+            }
+        return pred
 
     def predict_fixture(
         self, match: Dict[str, Any], neutral: bool = False, log: bool = True
@@ -1044,6 +1070,10 @@ class LeagueService:
             except Exception as exc:
                 logger.warning(f"Tracking prediction failed for {m.get('match_id')}: {exc}")
         prediction_log.record(self._current_code, pairs)
+        try:
+            self._calibration_T = prediction_log.temperature(self._current_code)
+        except Exception:
+            pass
 
     def _training_size(self) -> int:
         related = sum(len(d["matches"]) for d in self._related.values())

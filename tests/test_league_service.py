@@ -138,5 +138,50 @@ class TestPredictFixtureLogging(unittest.TestCase):
             rec.assert_not_called()
 
 
+class TestPredictionCalibration(unittest.TestCase):
+    """predict() rescales outcome probabilities by the fitted temperature:
+    T > 1 flattens an overconfident model toward uniform."""
+
+    class _FakeEngine:
+        fitted = True
+        teams = {"A", "B"}
+
+        def resolve_name(self, name):
+            return name
+
+        def predict(self, home, away, neutral=False, competition=None, contexts=None):
+            return {
+                "model": "test",
+                "outcome_probabilities": {
+                    "home_win": 0.7, "draw": 0.2, "away_win": 0.1
+                },
+            }
+
+    def _service(self, T):
+        svc = LeagueService.__new__(LeagueService)
+        svc._engine = self._FakeEngine()
+        svc._team_contexts = {}
+        svc._current_code = "PL"
+        svc._calibration_T = T
+        return svc
+
+    def test_probs_unchanged_without_temperature(self):
+        pred = self._service(None).predict("A", "B")
+        self.assertEqual(pred["outcome_probabilities"]["home_win"], 0.7)
+
+    def test_hot_temperature_flattens_probs(self):
+        pred = self._service(2.0).predict("A", "B")
+        probs = pred["outcome_probabilities"]
+        self.assertLess(probs["home_win"], 0.7)
+        self.assertGreater(probs["away_win"], 0.1)
+        self.assertAlmostEqual(sum(probs.values()), 1.0)
+
+    def test_cold_temperature_sharpens_probs(self):
+        pred = self._service(0.6).predict("A", "B")
+        probs = pred["outcome_probabilities"]
+        self.assertGreater(probs["home_win"], 0.7)
+        self.assertAlmostEqual(sum(probs.values()), 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()

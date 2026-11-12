@@ -51,11 +51,12 @@ MAX_EXPECTED_GOALS = 5.0
 
 # Draw model: learned league draw rate (bounded), shrunk as the Elo gap
 # grows, with a hard floor so tight low-scoring matchups keep a sane draw
-# probability.
+# probability. The floor is deliberately low — at 0.18 even a >1000-Elo
+# mismatch still priced the draw at 18%, far above real markets (~8-12%).
 DRAW_RATE_MIN = 0.15
 DRAW_RATE_MAX = 0.30
 DRAW_ELO_SCALE = 1200.0
-DRAW_FLOOR = 0.18
+DRAW_FLOOR = 0.10
 
 # Outcome blend: Poisson goal model vs Elo win expectancy.
 BLEND_POISSON = 0.50
@@ -359,7 +360,14 @@ class PredictionEngine:
             return
 
         df = pd.DataFrame(records)
+        # Feeds store naive SAST kickoffs; only a few carry offsets. Parse
+        # everything, then reinterpret the naive rows as SAST → UTC so
+        # dedup and recency weights compare real instants, not zones.
+        naive = ~df["date"].astype(str).str.contains(
+            r"(?:Z|[+-]\d{2}:?\d{2})$", regex=True
+        )
         df["date"] = pd.to_datetime(df["date"], utc=True, errors="coerce")
+        df.loc[naive & df["date"].notna(), "date"] -= pd.Timedelta(hours=2)
         df = df.dropna(subset=["home_score", "away_score", "date"])
         if "competition" not in df.columns:
             df["competition"] = "default"
@@ -601,6 +609,7 @@ class PredictionEngine:
         # instead of silently degrading to the weak fallback path.
         for t in self.teams:
             if teams_equivalent(name, t):
+                logger.info(f"Fuzzy-resolved team '{name}' to '{t}'")
                 return t
         return name
 
@@ -694,12 +703,22 @@ class PredictionEngine:
             weights = np.array([e["weight"] for e in recent], dtype=float)
             self.comp_form_ppg[f"{comp}|{t}"] = _weighted_avg(pts, weights) / 3.0
 
-    def _form_factor(self, team: str, competition: Optional[str] = None) -> float:
+    def _form_factor(
+        self,
+        team: str,
+        competition: Optional[str] = None,
+        ctx: Optional[Dict[str, Any]] = None,
+    ) -> float:
+        """Form adjustment as the gap between recent results and the team's
+        season baseline — a hot streak only counts once: the season PPG
+        (applied via the context factor) already prices the baseline."""
         overall = self.form_ppg.get(team, 0.5)
         comp_ppg = self.comp_form_ppg.get(f"{competition}|{team}") if competition else None
         # Blend same-tournament form with all-competition form when available.
         ppg = overall if comp_ppg is None else 0.4 * overall + 0.6 * comp_ppg
-        return 1.0 + FORM_WEIGHT * (ppg - 0.5)
+        season = (ctx or {}).get("ppg")
+        baseline = season / 3.0 if season is not None else 0.5
+        return 1.0 + FORM_WEIGHT * (ppg - baseline)
 
     @staticmethod
     def _context_factor(ctx: Optional[Dict[str, Any]]) -> float:
@@ -734,9 +753,10 @@ class PredictionEngine:
         home_ctx = contexts.get(home_team)
         away_ctx = contexts.get(away_team)
 
-        # Recent form (blended with same-tournament form) x log-position context.
-        home_factor = self._form_factor(home_team, competition) * self._context_factor(home_ctx)
-        away_factor = self._form_factor(away_team, competition) * self._context_factor(away_ctx)
+        # Recent form vs season baseline (blended with same-tournament
+        # form) x log-position context.
+        home_factor = self._form_factor(home_team, competition, home_ctx) * self._context_factor(home_ctx)
+        away_factor = self._form_factor(away_team, competition, away_ctx) * self._context_factor(away_ctx)
         home_factor = min(FORM_FACTOR_MAX, max(FORM_FACTOR_MIN, home_factor))
         away_factor = min(FORM_FACTOR_MAX, max(FORM_FACTOR_MIN, away_factor))
 

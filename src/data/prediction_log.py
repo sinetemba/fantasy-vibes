@@ -145,6 +145,53 @@ def settle(league: str, matches: List[Dict[str, Any]]) -> None:
             _save(entries)
 
 
+# Fit window for outcome-probability temperature scaling.
+_RESULT_IDX = {"home_win": 0, "draw": 1, "away_win": 2}
+
+
+def temperature(league: str, days: int = 120, min_n: int = 120) -> Optional[float]:
+    """Temperature that rescales this league's logged probabilities to
+    match observed outcomes: T > 1 means the model is overconfident and
+    its predictions should be flattened toward uniform. Golden-section
+    search on negative log-likelihood over settled entries; None below
+    the sample floor or when ~1 (nothing to correct)."""
+    cutoff = sast_now() - timedelta(days=days)
+    with _lock:
+        rows = [
+            (e["p_home"], e["p_draw"], e["p_away"], e["result"])
+            for e in _load().values()
+            if e["league"] == league
+            and e.get("result") in _RESULT_IDX
+            and (kickoff_sast(e["date"]) or cutoff) > cutoff
+        ]
+    if len(rows) < min_n:
+        return None
+
+    def nll(T: float) -> float:
+        loss = 0.0
+        for h, d, a, result in rows:
+            ps = [max(float(p), 1e-12) ** (1.0 / T) for p in (h, d, a)]
+            total = sum(ps)
+            loss -= math.log(max(ps[_RESULT_IDX[result]] / total, 1e-12))
+        return loss
+
+    lo, hi = 0.5, 3.0
+    gr = (math.sqrt(5.0) - 1.0) / 2.0
+    x1, x2 = hi - gr * (hi - lo), lo + gr * (hi - lo)
+    f1, f2 = nll(x1), nll(x2)
+    for _ in range(60):
+        if f1 < f2:
+            hi, x2, f2 = x2, x1, f1
+            x1 = hi - gr * (hi - lo)
+            f1 = nll(x1)
+        else:
+            lo, x1, f1 = x1, x2, f2
+            x2 = lo + gr * (hi - lo)
+            f2 = nll(x2)
+    T = (lo + hi) / 2.0
+    return None if abs(T - 1.0) < 0.05 else round(T, 3)
+
+
 def summary(days: int = 30) -> Dict[str, Any]:
     """Accuracy of settled predictions whose kickoff fell in the last
     `days` days: hit rate (likeliest outcome), Brier score, log-loss and
