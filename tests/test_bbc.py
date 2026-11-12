@@ -1,11 +1,13 @@
 """Tests for the BBC source: event dedupe, TBC times and shared helpers."""
 
 import unittest
+from datetime import timedelta
 from typing import Any, Dict, Optional
+from unittest.mock import patch
 
 from src.data.league_service import LeagueService
 from src.data.sources.bbc import BBCSource, _dedupe_events
-from src.data.utils import compute_table, is_upcoming
+from src.data.utils import compute_table, is_upcoming, sast_now
 
 
 def _event(
@@ -101,6 +103,58 @@ class TestToMatch(unittest.TestCase):
         m = BBCSource()._to_match(e, "G")
         self.assertEqual(m["status"], "full_time")
         self.assertEqual((m["home_score"], m["away_score"]), (2, 1))
+
+
+class TestFetchWindow(unittest.TestCase):
+    """The feed rejects multi-day ranges starting too far back — a failed
+    window must degrade to smaller requests rather than drop its fixtures."""
+
+    def _src(self, fail):
+        src = BBCSource()
+
+        def fake_fetch(_self, start, end):
+            if fail(start, end):
+                return None
+            return [{"displayLabel": f"{start}..{end}"}]
+
+        return src, fake_fetch
+
+    def test_failed_window_splits_into_days_before_today(self):
+        today = sast_now().date()
+        start = today - timedelta(days=6)
+        calls = []
+
+        def fail(s, e):
+            calls.append((s, e))
+            return s != e and s < today.isoformat()
+
+        src, fake = self._src(fail)
+        with patch.object(BBCSource, "_fetch", fake):
+            out = src._fetch_window(start.isoformat(), (today + timedelta(days=18)).isoformat())
+        self.assertEqual(len(out), 7)
+        # Six past days fetched individually plus the today-onward range.
+        self.assertIn((start.isoformat(), start.isoformat()), calls)
+        self.assertIn((today.isoformat(), (today + timedelta(days=18)).isoformat()), calls)
+
+    def test_failed_recent_window_bisects(self):
+        today = sast_now().date()
+        src, fake = self._src(lambda s, e: s != e)
+        with patch.object(BBCSource, "_fetch", fake):
+            out = src._fetch_window(today.isoformat(), (today + timedelta(days=2)).isoformat())
+        self.assertEqual(len(out), 3)
+
+    def test_single_day_failure_gives_up(self):
+        today = sast_now().date()
+        src, fake = self._src(lambda s, e: True)
+        with patch.object(BBCSource, "_fetch", fake):
+            self.assertEqual(src._fetch_window(today.isoformat(), today.isoformat()), [])
+
+    def test_successful_window_unchanged(self):
+        today = sast_now().date()
+        src, fake = self._src(lambda s, e: False)
+        with patch.object(BBCSource, "_fetch", fake):
+            out = src._fetch_window(today.isoformat(), today.isoformat())
+        self.assertEqual(len(out), 1)
 
 
 class _FakeSource:

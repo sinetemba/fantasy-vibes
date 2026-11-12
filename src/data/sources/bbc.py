@@ -134,16 +134,46 @@ class BBCSource(DataSource):
     def is_available(self, league_config: Dict[str, Any]) -> bool:
         return "bbc" in league_config
 
-    def _fetch(self, start: str, end: str) -> List[Dict[str, Any]]:
+    def _fetch(self, start: str, end: str) -> Optional[List[Dict[str, Any]]]:
         today = sast_now().date().isoformat()
         url = (
             f"{BASE_URL}?urn={FOOTBALL_URN}"
             f"&selectedStartDate={start}&selectedEndDate={end}&todayDate={today}"
         )
         data = cached_get(url, ttl_seconds=900)
-        if not data:
-            return []
+        if data is None:
+            return None
         return data.get("eventGroups") or []
+
+    def _fetch_window(self, start: str, end: str) -> List[Dict[str, Any]]:
+        """Fetch a date window, splitting it when the feed rejects the range.
+
+        The feed serves single days and windows starting near today, but
+        400/500s on multi-day ranges that begin further back — a failed
+        window degrades to day-by-day fetches for the older portion and a
+        halved retry for the rest rather than losing every fixture in it."""
+        groups = self._fetch(start, end)
+        if groups is not None:
+            return groups
+        s, e = date.fromisoformat(start), date.fromisoformat(end)
+        if s >= e:
+            return []
+        today = sast_now().date()
+        out: List[Dict[str, Any]] = []
+        d = s
+        while d < min(today, e):
+            out.extend(self._fetch(d.isoformat(), d.isoformat()) or [])
+            d += timedelta(days=1)
+        if d > e:
+            return out
+        if d == s:
+            # Whole window is today-or-later yet still failed — halve it.
+            mid = s + timedelta(days=(e - s).days // 2)
+            out += self._fetch_window(s.isoformat(), mid.isoformat())
+            out += self._fetch_window((mid + timedelta(days=1)).isoformat(), e.isoformat())
+        else:
+            out += self._fetch_window(d.isoformat(), e.isoformat())
+        return out
 
     def get_matches(
         self, league_config: Dict[str, Any], season: Optional[str] = None
@@ -158,7 +188,7 @@ class BBCSource(DataSource):
 
         windows = _date_windows(back, ahead)
         with ThreadPoolExecutor(max_workers=min(6, len(windows) or 1)) as pool:
-            window_groups = list(pool.map(lambda w: self._fetch(*w), windows))
+            window_groups = list(pool.map(lambda w: self._fetch_window(*w), windows))
 
         events: List[Tuple[Dict[str, Any], str]] = []
         for groups in window_groups:
@@ -217,7 +247,10 @@ class BBCSource(DataSource):
             time_certain = bool(time_field["timeCertainty"])
         else:
             time_certain = "T" in (e.get("startDateTime") or "")
-        if period:
+        # periodLabel is an in-play clock ("HT", "1H"…) only while the
+        # event is live; scheduled games carry labels like "Scheduled"
+        # that must not shadow the kickoff time.
+        if period and status in ("live", "half_time"):
             minutes = period
         elif status == "scheduled" and dt is not None and time_certain:
             minutes = dt.strftime("%H:%M") + " SAST"
