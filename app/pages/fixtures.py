@@ -19,7 +19,7 @@ from app.ui import (
     prediction_summary_html,
     show_warning_message,
 )
-from src.data import LeagueService
+from src.data import LeagueService, prediction_log
 from src.data.utils import is_upcoming, sast_now
 
 logger = logging.getLogger(__name__)
@@ -142,15 +142,19 @@ def _render_filters(matches: List[Dict[str, Any]], service: LeagueService):
             to_predict = all_scheduled[:MAX_BATCH_PREDICTIONS]
             with st.spinner(f"Predicting {len(to_predict)} fixtures..."):
                 failed = 0
+                pairs = []
                 for m in to_predict:
                     try:
-                        pred = service.predict_fixture(m)
+                        pred = service.predict_fixture(m, log=False)
                     except Exception as exc:
                         logger.warning(f"Prediction failed for {m.get('match_id')}: {exc}")
                         failed += 1
                         continue
                     pred["predicted_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     predictions[m.get("match_id")] = pred
+                    pairs.append((m, pred))
+                if pairs:
+                    prediction_log.record(service.get_current_code(), pairs)
             msg = f"Predicted {len(to_predict) - failed} of {len(to_predict)} displayed matches"
             if len(all_scheduled) > MAX_BATCH_PREDICTIONS:
                 msg += f" (capped at {MAX_BATCH_PREDICTIONS})"

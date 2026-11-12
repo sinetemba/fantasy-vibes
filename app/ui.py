@@ -86,7 +86,9 @@ def _refresh_loop() -> None:
                         svc.refresh_live_matches()
                         svc.refit_model()
                     else:
-                        svc.refresh(refit=True)
+                        # No forced refit — refresh() skips the retrain when
+                        # the results the model was trained on are unchanged.
+                        svc.refresh()
                     # Score finished fixtures and log the coming week's
                     # predictions for the accuracy report.
                     svc.track_predictions()

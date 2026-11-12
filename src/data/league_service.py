@@ -185,6 +185,52 @@ def _senior_teams_only(matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     ]
 
 
+# Cross-service match memo: a refresh pass touches each league as its own
+# service AND as "related" data for siblings (CL pulls PL/PD/SA…, INTF
+# pulls 11 international leagues). The short TTL dedupes those repeat
+# fetches; entries hold raw source rows so each caller still applies its
+# own filters and competition tags.
+_MEMO_TTL = 300.0
+_match_memo: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
+_match_memo_lock = threading.Lock()
+
+
+def _memo_get(code: str) -> Optional[List[Dict[str, Any]]]:
+    with _match_memo_lock:
+        hit = _match_memo.get(code)
+        if hit is None or (time.time() - hit[0]) >= _MEMO_TTL:
+            return None
+        return [dict(m) for m in hit[1]]
+
+
+def _memo_put(code: str, matches: List[Dict[str, Any]]) -> None:
+    if not matches:
+        return
+    with _match_memo_lock:
+        _match_memo[code] = (time.time(), [dict(m) for m in matches])
+
+
+def _results_signature(
+    matches: List[Dict[str, Any]],
+    historical: List[Dict[str, Any]],
+    related: Dict[str, Dict[str, Any]],
+) -> int:
+    """Fingerprint of every completed result feeding a training run — when
+    unchanged, a retrain would reproduce the engine already in memory."""
+    rows = [
+        (
+            m.get("match_id")
+            or f"{m.get('home_team')}|{m.get('away_team')}|{(m.get('date') or '')[:10]}",
+            m.get("home_score"),
+            m.get("away_score"),
+        )
+        for pool in [matches, historical] + [d["matches"] for d in related.values()]
+        for m in pool
+        if m.get("status") == "full_time" and m.get("home_score") is not None
+    ]
+    return hash(frozenset(rows))
+
+
 class LeagueService:
     """Loads fixtures, tables and provides match predictions for a league."""
 
@@ -223,6 +269,8 @@ class LeagueService:
         self.data_stale = False
         self._standings_source_name = None
         self._engine = PredictionEngine()
+        # Signature of the results the current engine was trained on.
+        self._engine_signature: Optional[int] = None
         # Services are shared across sessions and threads. Writers (warm-up,
         # background refresh, Live refresh, Retrain) serialise on this lock
         # and build new state in locals before swapping it in, so readers
@@ -260,6 +308,7 @@ class LeagueService:
                 matches_fut = pool.submit(self._source.get_matches_with_source, league)
                 standings_fut = pool.submit(self._source.get_standings_with_source, league)
                 matches, match_source = matches_fut.result()
+                _memo_put(self._current_code, matches)
                 hist_fut = pool.submit(self._fetch_historical, match_source)
                 standings, standings_source = standings_fut.result()
                 historical = hist_fut.result()
@@ -283,14 +332,21 @@ class LeagueService:
             # other-tournament form.
             related = self._load_related()
 
+            sig = _results_signature(matches, historical, related)
             engine = None
-            if not refit and self._model_is_fresh():
-                try:
-                    engine = self._load_model()
-                    self._seed_elo(engine)
-                except Exception as exc:
-                    logger.warning(f"Persisted model invalid, retraining: {exc}")
-                    engine = None
+            if not refit:
+                if sig == self._engine_signature and self._engine is not None:
+                    # The training inputs haven't changed since the last
+                    # fit — reuse the in-memory engine instead of paying
+                    # for a retrain or even a model-file reload.
+                    engine = self._engine
+                elif self._model_is_fresh():
+                    try:
+                        engine = self._load_model()
+                        self._seed_elo(engine)
+                    except Exception as exc:
+                        logger.warning(f"Persisted model invalid, retraining: {exc}")
+                        engine = None
             if engine is None:
                 engine = self._train_engine(matches, historical, related, match_source)
             contexts = self._build_team_contexts(engine, matches, standings, related)
@@ -302,6 +358,7 @@ class LeagueService:
             self._match_source_name = match_source
             self._standings_source_name = standings_source
             self._engine = engine
+            self._engine_signature = sig
             self._team_contexts = contexts
             self._form_index = None
             self._group_match_cache.clear()
@@ -359,11 +416,14 @@ class LeagueService:
         ]
 
         def _fetch(code: str, cfg: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
-            try:
-                matches = self._source.get_matches(cfg)
-            except Exception as exc:
-                logger.warning(f"Related league {code} matches failed: {exc}")
-                matches = []
+            matches = _memo_get(code)
+            if matches is None:
+                try:
+                    matches = self._source.get_matches(cfg)
+                except Exception as exc:
+                    logger.warning(f"Related league {code} matches failed: {exc}")
+                    matches = []
+                _memo_put(code, matches)
             if cfg.get("senior_only"):
                 matches = _senior_teams_only(matches)
             matches = apply_postponements(matches, cfg)
@@ -457,6 +517,9 @@ class LeagueService:
                 engine, self.matches, self.standings, self._related
             )
             self._engine = engine
+            self._engine_signature = _results_signature(
+                self.matches, self._historical_matches, self._related
+            )
             self._team_contexts = contexts
 
     def refit_model(self):
@@ -483,6 +546,7 @@ class LeagueService:
                 return
             if not matches:
                 return
+            _memo_put(self._current_code, matches)
             if self._current_league.get("senior_only"):
                 matches = _senior_teams_only(matches)
             matches = apply_postponements(matches, self._current_league)
@@ -501,6 +565,7 @@ class LeagueService:
                 and m.get("match_id") not in prev_ft
             ]
             standings, engine, contexts = self.standings, self._engine, self._team_contexts
+            new_sig = None
             if new_results:
                 # Positions/PPG move when results land — patch the table and
                 # rebuild contexts against the refitted engine.
@@ -508,6 +573,9 @@ class LeagueService:
                 try:
                     engine = self._train_engine(
                         matches, self._historical_matches, self._related, match_source
+                    )
+                    new_sig = _results_signature(
+                        matches, self._historical_matches, self._related
                     )
                 except Exception as exc:
                     logger.warning(f"Model refit failed for {self._current_code}: {exc}")
@@ -519,6 +587,8 @@ class LeagueService:
             self.standings = standings
             self._match_source_name = match_source
             self._engine = engine
+            if new_sig is not None:
+                self._engine_signature = new_sig
             self._team_contexts = contexts
             self._form_index = None
             self._group_match_cache.clear()
@@ -639,11 +709,14 @@ class LeagueService:
 
         def _fetch(item: Tuple[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
             code, cfg = item
-            try:
-                league_matches = self._source.get_matches(cfg)
-            except Exception as exc:
-                logger.warning(f"Group league {code} matches failed: {exc}")
-                return []
+            league_matches = _memo_get(code)
+            if league_matches is None:
+                try:
+                    league_matches = self._source.get_matches(cfg)
+                except Exception as exc:
+                    logger.warning(f"Group league {code} matches failed: {exc}")
+                    return []
+                _memo_put(code, league_matches)
             if cfg.get("senior_only"):
                 league_matches = _senior_teams_only(league_matches)
             league_matches = apply_postponements(league_matches, cfg)
@@ -939,11 +1012,16 @@ class LeagueService:
             home, away, neutral, competition=self._current_code, contexts=contexts
         )
 
-    def predict_fixture(self, match: Dict[str, Any], neutral: bool = False) -> Dict[str, Any]:
+    def predict_fixture(
+        self, match: Dict[str, Any], neutral: bool = False, log: bool = True
+    ) -> Dict[str, Any]:
         """Predict a fixture row and log it so its accuracy is scored once
-        the result lands."""
+        the result lands. `log=False` defers the write — batch callers
+        should flush their pairs via prediction_log.record once at the end
+        rather than rewriting the log file per fixture."""
         pred = self.predict(match["home_team"], match["away_team"], neutral=neutral)
-        prediction_log.record(self._current_code, [(match, pred)])
+        if log:
+            prediction_log.record(self._current_code, [(match, pred)])
         return pred
 
     def track_predictions(self, horizon_days: int = 7) -> None:

@@ -17,7 +17,7 @@ from app.ui import (
     get_league_service,
     match_card_html,
 )
-from src.data import LeagueService
+from src.data import LeagueService, prediction_log
 from src.data.league_service import dedupe_matches, match_importance
 from src.data.sources.bbc import BBCSource
 from src.data.sources.composite import CompositeDataSource
@@ -236,14 +236,16 @@ def _predict_all_matches(matches: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Generate predictions for every match. Falls back to a generic model for unconfigured leagues."""
     predictions: Dict[str, Any] = {}
     fallback_svc = None
+    by_code: Dict[str, List] = {}
     for m in matches:
         code = m.get("league_code")
         if not code:
             continue
         try:
             svc = _league_service_for(code)
-            pred = svc.predict_fixture(m)
+            pred = svc.predict_fixture(m, log=False)
             predictions[m["match_id"]] = pred
+            by_code.setdefault(code, []).append((m, pred))
         except ValueError as exc:
             if "Unknown league code" not in str(exc):
                 logger.warning(f"Prediction failed for {m.get('match_id')}: {exc}")
@@ -259,6 +261,12 @@ def _predict_all_matches(matches: List[Dict[str, Any]]) -> Dict[str, Any]:
             predictions[m["match_id"]] = pred
         except Exception as exc:
             logger.warning(f"Prediction failed for {m.get('match_id')}: {exc}")
+    # One log write per league instead of one per fixture.
+    for code, pairs in by_code.items():
+        try:
+            prediction_log.record(code, pairs)
+        except Exception as exc:
+            logger.warning(f"Could not log predictions for {code}: {exc}")
     return predictions
 
 

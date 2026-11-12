@@ -339,5 +339,73 @@ class TestPredictionEngine(unittest.TestCase):
         self.assertEqual(names["Tottenham Hotspur"], names["Tottenham"])
 
 
+class TestFallback(unittest.TestCase):
+    """The rating-only path used when a team isn't in the training pool —
+    it should still respect home field, Elo-gap-scaled draws and any
+    fitted ratings the known side has."""
+
+    def _fitted(self):
+        # Mixed results so the learned draw rate (~40%, clamped to 0.30)
+        # sits well above DRAW_FLOOR — otherwise the floor hides the
+        # Elo-gap scaling this suite checks.
+        matches = []
+        i = 0
+        for (home, away, hs, aws), n in [
+            (("Team A", "Team B", 5, 0), 8),
+            (("Team B", "Team A", 1, 0), 4),
+            (("Team A", "Team B", 1, 1), 4),
+            (("Team B", "Team A", 2, 2), 4),
+        ]:
+            for _ in range(n):
+                i += 1
+                matches.append({
+                    "status": "full_time", "home_team": home, "away_team": away,
+                    "home_score": hs, "away_score": aws, "competition": "L",
+                    "date": f"2026-{1 + i // 28:02d}-{1 + i % 28:02d}T15:00:00",
+                })
+        engine = PredictionEngine()
+        engine.fit(matches, initial_elo={"Giant": 1900, "Minnow": 800}, primary_competition="L")
+        return engine
+
+    def test_home_advantage_applies(self):
+        engine = self._fitted()
+        pred = engine.predict("Ghost FC", "Phantom FC")  # both unknown → fallback
+        self.assertEqual(pred["model"], "elo_fallback")
+        self.assertGreater(
+            pred["outcome_probabilities"]["home_win"],
+            pred["outcome_probabilities"]["away_win"],
+        )
+
+    def test_neutral_removes_home_edge(self):
+        engine = self._fitted()
+        pred = engine.predict("Ghost FC", "Phantom FC", neutral=True)
+        self.assertAlmostEqual(
+            pred["outcome_probabilities"]["home_win"],
+            pred["outcome_probabilities"]["away_win"],
+        )
+
+    def test_draw_shrinks_with_elo_gap(self):
+        engine = self._fitted()
+        even = engine.predict("Ghost FC", "Phantom FC", neutral=True)
+        mismatch = engine.predict("Giant", "Minnow", neutral=True)
+        self.assertLess(
+            mismatch["outcome_probabilities"]["draw"],
+            even["outcome_probabilities"]["draw"],
+        )
+
+    def test_known_side_keeps_fitted_ratings(self):
+        # A strong fitted home attack must flow into expected goals even
+        # when the opponent resolves to nothing — not a league-average guess.
+        engine = self._fitted()
+        engine.home_attack["Team A"] = 2.0
+        pred = engine.predict("Team A", "Ghost FC")
+        self.assertEqual(pred["model"], "elo_fallback")
+        self.assertAlmostEqual(
+            pred["expected_goals"]["home"],
+            min(5.0, engine.league_avg_home * 2.0),
+            delta=0.01,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

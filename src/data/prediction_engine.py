@@ -728,7 +728,7 @@ class PredictionEngine:
         home_team = self.resolve_name(home_team)
         away_team = self.resolve_name(away_team)
         if not self.fitted or home_team not in self.teams or away_team not in self.teams:
-            return self._fallback(home_team, away_team)
+            return self._fallback(home_team, away_team, neutral, competition)
 
         contexts = contexts or {}
         home_ctx = contexts.get(home_team)
@@ -905,17 +905,54 @@ class PredictionEngine:
         key = _TEAM_KEY_ALIASES.get(key, key)
         return self.elo_prior.get(key, self.elo_unrated)
 
-    def _fallback(self, home_team: str, away_team: str) -> Dict[str, Any]:
+    def _fallback(
+        self,
+        home_team: str,
+        away_team: str,
+        neutral: bool = False,
+        competition: Optional[str] = None,
+    ) -> Dict[str, Any]:
         home_elo = self._team_elo(home_team)
         away_elo = self._team_elo(away_team)
-        expected_home = _expected_score(home_elo, away_elo)
-        draw = max(DRAW_FLOOR, self.draw_rate)
+        field = 0.0 if neutral else ELO_HOME_FIELD
+        elo_diff = home_elo - away_elo + field
+        expected_home = _expected_score(home_elo, away_elo, field)
+        draw_rate = self.comp_draw_rate.get(str(competition), self.draw_rate)
+        # Same Elo-gap-scaled draw as the main path — a heavy favourite
+        # should not carry a flat ~25% draw rate.
+        draw = _draw_prob(elo_diff, draw_rate)
         remaining = 1.0 - draw
         home_win = expected_home * remaining
         away_win = (1.0 - expected_home) * remaining
         home_win, draw, away_win = _rounded_probs(home_win, draw, away_win)
-        home_exp = max(0.5, min(4.0, 2.5 * (home_elo / (home_elo + away_elo)) * 1.1))
-        away_exp = max(0.5, min(4.0, 2.5 * (away_elo / (home_elo + away_elo))))
+
+        # Expected goals off the competition baselines and any fitted
+        # attack/defense ratings — a known side keeps its real strength
+        # even when the opponent only resolves to a prior; both-unknown
+        # fixtures fall back to the baseline scoring rates.
+        avg_h, avg_a = self.comp_avg.get(
+            str(competition), (self.league_avg_home, self.league_avg_away)
+        )
+        if neutral:
+            avg_h = avg_a = math.sqrt(avg_h * avg_a)
+        home_exp = max(
+            0.1,
+            min(
+                MAX_EXPECTED_GOALS,
+                avg_h
+                * self.home_attack.get(home_team, 1.0)
+                * self.away_defense.get(away_team, 1.0),
+            ),
+        )
+        away_exp = max(
+            0.1,
+            min(
+                MAX_EXPECTED_GOALS,
+                avg_a
+                * self.away_attack.get(away_team, 1.0)
+                * self.home_defense.get(home_team, 1.0),
+            ),
+        )
 
         matrix = [
             [_poisson_pmf(i, home_exp) * _poisson_pmf(j, away_exp) for j in range(7)]

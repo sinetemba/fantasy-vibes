@@ -16,7 +16,7 @@ from app.ui import (
     prewarm_league_services,
     show_warning_message,
 )
-from src.data import LeagueService
+from src.data import LeagueService, prediction_log
 from src.data.league_service import match_importance
 from src.data.utils import sast_now
 
@@ -223,11 +223,13 @@ def _predict_all(matches: List[Dict[str, Any]]) -> None:
 
     progress = st.progress(0, text="Predicting…")
     total = len(pending)
+    by_comp: Dict[str, List] = {}
     for i, m in enumerate(pending):
         try:
-            pred = _service_for(m["competition"]).predict_fixture(m)
+            pred = _service_for(m["competition"]).predict_fixture(m, log=False)
             pred["predicted_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             predictions[m.get("match_id")] = pred
+            by_comp.setdefault(m["competition"], []).append((m, pred))
         except Exception as exc:
             logger.warning(f"Prediction failed for {m.get('match_id')}: {exc}")
         progress.progress(
@@ -235,6 +237,12 @@ def _predict_all(matches: List[Dict[str, Any]]) -> None:
             text=f"Predicted {m.get('home_team', '?')} v {m.get('away_team', '?')}",
         )
     progress.empty()
+    # One log write per competition instead of one per fixture.
+    for comp, pairs in by_comp.items():
+        try:
+            prediction_log.record(comp, pairs)
+        except Exception as exc:
+            logger.warning(f"Could not log predictions for {comp}: {exc}")
 
 
 def _render_match(m: Dict[str, Any]):

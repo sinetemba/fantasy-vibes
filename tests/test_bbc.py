@@ -5,7 +5,7 @@ from datetime import timedelta
 from typing import Any, Dict, Optional
 from unittest.mock import patch
 
-from src.data.league_service import LeagueService
+from src.data.league_service import LeagueService, _match_memo
 from src.data.sources.bbc import BBCSource, _dedupe_events
 from src.data.utils import compute_table, is_upcoming, sast_now
 
@@ -180,6 +180,7 @@ def _match(home, away, day, comp=""):
 
 class TestGroupMatchDedupe(unittest.TestCase):
     def _service(self, leagues, by_code):
+        _match_memo.clear()  # process-wide cache — isolate per test
         svc = LeagueService.__new__(LeagueService)
         svc._leagues = leagues
         svc._source = _FakeSource(by_code)
