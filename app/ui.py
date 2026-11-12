@@ -363,7 +363,7 @@ def prediction_summary_html(
     outcome bar, likeliest scores, reasons and any data caveat."""
     reasons = prediction_reasons(pred, home, away)
     caveat = prediction_caveat(pred)
-    muted = "font-size:0.8rem;color:#a0a0a0;margin-top:0.3rem;"
+    muted = "font-size:0.8rem;color:var(--fv-muted);margin-top:0.3rem;"
     return (
         f"<div style='font-weight:700;font-size:1rem;margin-top:0.5rem;'>"
         f"{safe_html(prediction_verdict(pred, home, away))}</div>"
@@ -392,6 +392,14 @@ COLORS = {
 
 DARK_CSS = """
 <style>
+    :root {
+        /* Theme-aware accents — inline HTML reads these so it follows
+           the sidebar theme toggle; the light palette only swaps the
+           values, not the markup. */
+        --fv-accent: #00ff85;
+        --fv-muted: #a0a0a0;
+        --fv-border: #2c3e50;
+    }
     .main > div { padding: 0rem 1rem; }
 
     .epl-title {
@@ -580,8 +588,56 @@ DARK_CSS = """
     .group-table td:first-child { color: #a0a0a0; }
     .qualified { color: #00ff85; font-weight: 700; }
     .relegation { color: #e74c3c; font-weight: 700; }
+
+    /* Small screens: stack the custom match-card row vertically —
+       native st.columns already wraps on Streamlit >= 1.36. */
+    @media (max-width: 640px) {
+        .match-teams { flex-direction: column !important; gap: 0.25rem !important; }
+        .match-teams > div { text-align: center !important; }
+    }
 </style>
 """
+
+# Palette swaps that turn the dark stylesheet into a light one. Two-pass
+# replacement (tokens first) so an inserted value is never re-matched.
+_LIGHT_MAP = {
+    "#0b0c10": "#f5f6f7",  # page background -> light
+    "#1f2833": "#ffffff",  # cards, dropdowns
+    "#2c3e50": "#d8dde3",  # borders
+    "#f5f6f7": "#1f2833",  # body text -> dark
+    "#a0a0a0": "#5b6770",  # muted text
+    "#00ff85": "#007a3d",  # accent: readable green on light
+    "#161b22": "#eef1f4",  # striped table rows
+}
+
+# Elements with bright-coloured or pale backgrounds keep dark text in
+# light mode; the table header keeps its neon accent on purple.
+_LIGHT_FIXES = """
+    .info-box, .warning-box, .error-box, .metric-box, .prob-bar {
+        color: #0b0c10 !important;
+    }
+    .group-table th { color: #00ff85 !important; }
+    [data-testid="stSidebar"] .stButton > button,
+    [data-testid="stSidebar"] button[kind="secondary"] {
+        background-color: rgba(0, 0, 0, 0.05) !important;
+        border-color: rgba(0, 122, 61, 0.4) !important;
+    }
+    ul[data-testid="stSelectboxVirtualDropdown"] li[role="option"][aria-selected="true"],
+    ul[data-testid="stSelectboxVirtualDropdown"] li[role="option"][aria-selected="true"] * {
+        color: #ffffff !important;
+    }
+"""
+
+
+def _themed_css(css: str) -> str:
+    for i, dark in enumerate(_LIGHT_MAP):
+        css = css.replace(dark, f"@@{i}@@")
+    for i, light in enumerate(_LIGHT_MAP.values()):
+        css = css.replace(f"@@{i}@@", light)
+    return css
+
+
+LIGHT_CSS = _themed_css(DARK_CSS).replace("</style>", _LIGHT_FIXES + "</style>")
 
 _STANDINGS_TABLE_CSS = dedent(
     """
@@ -624,14 +680,23 @@ _STANDINGS_TABLE_CSS = dedent(
     """
 ).strip()
 
+_STANDINGS_TABLE_CSS_LIGHT = _themed_css(_STANDINGS_TABLE_CSS).replace(
+    "</style>", "    .group-table th { color: #00ff85 !important; }\n</style>"
+)
+
 
 def safe_html(text: str) -> str:
     return html.escape(str(text))
 
 
+def _light_mode() -> bool:
+    return st.session_state.get("theme") == "Light"
+
+
 def apply_theme():
-    """Apply the dark/night mode CSS."""
-    st.markdown(DARK_CSS, unsafe_allow_html=True)
+    """Apply the theme CSS — dark by default, light when the sidebar
+    toggle picked it."""
+    st.markdown(LIGHT_CSS if _light_mode() else DARK_CSS, unsafe_allow_html=True)
 
 
 def display_header(title: str, subtitle: str):
@@ -706,7 +771,7 @@ def create_scoreline_chart(prob_matrix: np.ndarray, max_goals: int = 5) -> go.Fi
         height=400,
         margin=dict(l=50, r=20, t=50, b=50),
         paper_bgcolor="rgba(0,0,0,0)",
-        font=dict(color=COLORS["text"]),
+        font=dict(color=COLORS["card"] if _light_mode() else COLORS["text"]),
     )
     return fig
 
@@ -775,7 +840,31 @@ def create_standings_table(rows: List[Dict], zones: Optional[Dict[str, int]] = N
         </div>
         """
     ).strip()
-    return _STANDINGS_TABLE_CSS + "\n" + table_html
+    css = _STANDINGS_TABLE_CSS_LIGHT if _light_mode() else _STANDINGS_TABLE_CSS
+    return css + "\n" + table_html
+
+
+def zone_legend_html(zones: Optional[Dict[str, int]]) -> str:
+    """Caption under the standings table explaining the colour zones —
+    colour is never the only cue."""
+    zones = zones or {}
+    bits = []
+    if zones.get("qualification"):
+        bits.append(
+            f"<span style='color:var(--fv-accent);'>■</span> "
+            f"top {zones['qualification']}: qualification"
+        )
+    if zones.get("relegation"):
+        bits.append(
+            f"<span style='color:#e74c3c;'>■</span> "
+            f"bottom {zones['relegation']}: relegation"
+        )
+    if not bits:
+        return ""
+    return (
+        f"<div style='font-size:0.8rem;color:var(--fv-muted);margin-top:0.25rem;'>"
+        f"{' &nbsp;·&nbsp; '.join(bits)}</div>"
+    )
 
 
 def match_card_html(
@@ -818,12 +907,12 @@ def match_card_html(
         expected = prediction.get("expected_goals") or {}
         extras += dedent(
             f"""
-            <details style="margin-top:0.5rem; border-top:1px solid #2c3e50; padding-top:0.5rem;">
-                <summary style="cursor:pointer; font-size:0.85rem; font-weight:700; color:#00ff85;">
+            <details style="margin-top:0.5rem; border-top:1px solid var(--fv-border); padding-top:0.5rem;">
+                <summary style="cursor:pointer; font-size:0.85rem; font-weight:700; color:var(--fv-accent);">
                     🔮 Prediction
                 </summary>
                 {prediction_summary_html(prediction, home_team, away_team)}
-                <div style='font-size:0.75rem;color:#a0a0a0;margin-top:0.2rem;'>
+                <div style='font-size:0.75rem;color:var(--fv-muted);margin-top:0.2rem;'>
                     Expected goals: {expected.get('home', 0):.1f} – {expected.get('away', 0):.1f}
                 </div>
             </details>
@@ -834,16 +923,16 @@ def match_card_html(
         f"""
         <div class="card" style="padding:1rem; margin:0.5rem 0;">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.75rem;">
-                <span style="font-size:0.8rem; color:#a0a0a0;">{safe_html(round_label)}</span>
+                <span style="font-size:0.8rem; color:var(--fv-muted);">{safe_html(round_label)}</span>
                 <span style="background:{status_color}; color:#0b0c10; padding:0.25rem 0.6rem; border-radius:12px; font-size:0.75rem; font-weight:700;">
                     {safe_html(status_label)}
                 </span>
             </div>
-            <div style="display:flex; justify-content:space-between; align-items:center; gap:1rem;">
+            <div class="match-teams" style="display:flex; justify-content:space-between; align-items:center; gap:1rem;">
                 <div style="flex:1; text-align:right; font-weight:700; font-size:1.1rem;">{safe_html(home_team)}</div>
                 <div style="min-width:80px; text-align:center;">
-                    <div style="font-size:1.8rem; font-weight:800; color:#00ff85;">{score}</div>
-                    <div style="font-size:0.75rem; color:#a0a0a0;">{safe_html(time)}{" SAST" if ":" in str(time) else ""}</div>
+                    <div style="font-size:1.8rem; font-weight:800; color:var(--fv-accent);">{score}</div>
+                    <div style="font-size:0.75rem; color:var(--fv-muted);">{safe_html(time)}{" SAST" if ":" in str(time) else ""}</div>
                 </div>
                 <div style="flex:1; text-align:left; font-weight:700; font-size:1.1rem;">{safe_html(away_team)}</div>
             </div>

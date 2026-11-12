@@ -72,6 +72,7 @@ def _save_preferences():
                 {
                     "last_league": st.session_state.get("last_league"),
                     "favourite_teams": st.session_state.get("favourite_teams", {}),
+                    "theme": st.session_state.get("theme", "Dark"),
                 },
                 f,
                 indent=2,
@@ -85,6 +86,8 @@ def init_session_state():
     # process — kicked off before the (blocking) default-service build so
     # background warm-up overlaps it; every later call is a no-op.
     prewarm_all_services()
+    if "theme" not in st.session_state:
+        st.session_state.theme = _load_preferences().get("theme", "Dark")
     svc = st.session_state.get("league_service")
     if svc is None:
         with st.spinner("Loading league data…"):
@@ -253,8 +256,16 @@ def render_sidebar():
         # Freshness, not provider names — those are listed on the About page.
         st.caption(f"🕒 Data updated {_updated_ago(getattr(service, 'last_refreshed', None))}")
         if getattr(service, "data_stale", False):
-            st.caption("⚠️ A data feed is down — showing cached results.")
+            st.caption("⚠️ A data feed is down — showing cached results. Refresh to retry.")
+        if st.button("🔄 Refresh data", use_container_width=True):
+            with st.spinner("Refreshing…"):
+                service.refresh()
+            st.rerun()
 
+        st.markdown("---")
+        st.segmented_control(
+            "🎨 Theme", ["Dark", "Light"], key="theme", on_change=_save_preferences
+        )
         st.markdown("---")
         st.caption(
             "v1.0.0 · Built with Streamlit · Data from public football datasets"
@@ -301,8 +312,10 @@ def render_page():
 
 
 def main():
-    apply_theme()
+    # init first so the persisted theme is loaded before apply_theme picks
+    # the stylesheet.
     init_session_state()
+    apply_theme()
     render_sidebar()
     render_page()
 

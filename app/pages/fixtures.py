@@ -141,26 +141,31 @@ def _render_filters(matches: List[Dict[str, Any]], service: LeagueService):
             all_scheduled = [m for m in filtered if m.get("status") == "scheduled"]
             to_predict = all_scheduled[:MAX_BATCH_PREDICTIONS]
             with st.spinner(f"Predicting {len(to_predict)} fixtures..."):
-                failed = 0
+                failed = []
                 pairs = []
                 for m in to_predict:
                     try:
                         pred = service.predict_fixture(m, log=False)
                     except Exception as exc:
                         logger.warning(f"Prediction failed for {m.get('match_id')}: {exc}")
-                        failed += 1
+                        failed.append(
+                            f"{m.get('home_team', '?')} v {m.get('away_team', '?')}"
+                        )
                         continue
                     pred["predicted_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     predictions[m.get("match_id")] = pred
                     pairs.append((m, pred))
                 if pairs:
                     prediction_log.record(service.get_current_code(), pairs)
-            msg = f"Predicted {len(to_predict) - failed} of {len(to_predict)} displayed matches"
+            msg = f"Predicted {len(to_predict) - len(failed)} of {len(to_predict)} displayed matches"
             if len(all_scheduled) > MAX_BATCH_PREDICTIONS:
                 msg += f" (capped at {MAX_BATCH_PREDICTIONS})"
-            if failed:
-                msg += f" — {failed} failed"
             st.success(msg)
+            if failed:
+                st.warning(
+                    f"{len(failed)} failed: {', '.join(failed[:5])}"
+                    + ("…" if len(failed) > 5 else "")
+                )
 
     if st.session_state["fixture_predictions"]:
         if st.button("🗑️ Clear predictions", use_container_width=True):
@@ -276,11 +281,11 @@ def _render_prediction_summary(
     st.markdown(prediction_summary_html(pred, home, away), unsafe_allow_html=True)
     if service is not None:
         st.markdown(
-            f"<div style='font-size:0.8rem;color:#a0a0a0;margin-top:0.3rem;'>"
+            f"<div style='font-size:0.8rem;color:var(--fv-muted);margin-top:0.3rem;'>"
             f"🏠 Form: {form_badges_html(service.get_team_form(home))}"
             f"&nbsp;&nbsp;·&nbsp;&nbsp;"
             f"✈️ Form: {form_badges_html(service.get_team_form(away))}"
-            f"&nbsp;<span style='font-size:0.7rem;'>(latest →)</span></div>",
+            f"&nbsp;<span style='font-size:0.7rem;'>(W win · D draw · L loss — latest →)</span></div>",
             unsafe_allow_html=True,
         )
     if pred.get("predicted_at"):

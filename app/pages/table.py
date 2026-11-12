@@ -10,6 +10,7 @@ from app.ui import (
     display_disclaimer,
     display_header,
     show_info_message,
+    zone_legend_html,
 )
 from src.data import LeagueService
 
@@ -25,11 +26,15 @@ def render(service: LeagueService):
         return
 
     table_height = max(180, 80 + len(standings) * 50)
+    zones = service.get_zones()
     components.html(
-        create_standings_table(standings, zones=service.get_zones()),
+        create_standings_table(standings, zones=zones),
         height=table_height,
         scrolling=False,
     )
+    legend = zone_legend_html(zones)
+    if legend:
+        st.markdown(legend, unsafe_allow_html=True)
 
     st.markdown("---")
     with st.expander("📋 Raw table data"):

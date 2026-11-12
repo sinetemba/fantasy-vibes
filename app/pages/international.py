@@ -224,6 +224,7 @@ def _predict_all(matches: List[Dict[str, Any]]) -> None:
     progress = st.progress(0, text="Predicting…")
     total = len(pending)
     by_comp: Dict[str, List] = {}
+    failed = []
     for i, m in enumerate(pending):
         try:
             pred = _service_for(m["competition"]).predict_fixture(m, log=False)
@@ -232,6 +233,7 @@ def _predict_all(matches: List[Dict[str, Any]]) -> None:
             by_comp.setdefault(m["competition"], []).append((m, pred))
         except Exception as exc:
             logger.warning(f"Prediction failed for {m.get('match_id')}: {exc}")
+            failed.append(f"{m.get('home_team', '?')} v {m.get('away_team', '?')}")
         progress.progress(
             (i + 1) / total,
             text=f"Predicted {m.get('home_team', '?')} v {m.get('away_team', '?')}",
@@ -243,6 +245,11 @@ def _predict_all(matches: List[Dict[str, Any]]) -> None:
             prediction_log.record(comp, pairs)
         except Exception as exc:
             logger.warning(f"Could not log predictions for {comp}: {exc}")
+    if failed:
+        st.warning(
+            f"{len(failed)} predictions failed: {', '.join(failed[:5])}"
+            + ("…" if len(failed) > 5 else "")
+        )
 
 
 def _render_match(m: Dict[str, Any]):

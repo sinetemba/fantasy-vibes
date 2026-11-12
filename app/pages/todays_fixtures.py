@@ -346,8 +346,17 @@ def render(service: LeagueService):
     with c3:
         if st.button("🔮 Regenerate Predictions", use_container_width=True):
             with st.spinner("Predicting selected fixtures..."):
-                st.session_state["today_predictions"].update(_predict_all_matches(visible_matches))
+                new = _predict_all_matches(visible_matches)
+                st.session_state["today_predictions"].update(new)
+            missed = len(visible_matches) - len(new)
+            st.session_state["today_pred_warning"] = (
+                f"{missed} fixture(s) could not be predicted — service unavailable."
+                if missed
+                else ""
+            )
             st.rerun()
+    if st.session_state.get("today_pred_warning"):
+        st.warning(st.session_state.pop("today_pred_warning"))
 
     # Auto-generate predictions on first load, capped — every distinct
     # league may trigger a full service build (fetch + model fit), so an

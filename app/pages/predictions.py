@@ -81,9 +81,10 @@ def render(service: LeagueService):
 def _render_form(form):
     """Render last-5 form as W/D/L badges (rightmost = most recent)."""
     st.markdown(
-        f"<div style='margin-top:0.2rem'><span style='color:#a0a0a0;font-size:0.8rem;'>Form&nbsp;</span>"
+        f"<div style='margin-top:0.2rem'><span style='color:var(--fv-muted);font-size:0.8rem;'>Form&nbsp;</span>"
         f"{form_badges_html(form)}"
-        f"<span style='color:#a0a0a0;font-size:0.75rem;margin-left:4px;'>latest →</span></div>",
+        f"<span style='color:var(--fv-muted);font-size:0.75rem;margin-left:4px;'>"
+        f"W win · D draw · L loss — latest →</span></div>",
         unsafe_allow_html=True,
     )
 
