@@ -185,6 +185,16 @@ class TestPredictionCalibration(unittest.TestCase):
         self.assertGreater(probs["home_win"], 0.7)
         self.assertAlmostEqual(sum(probs.values()), 1.0)
 
+    def test_raw_probabilities_are_pre_calibration(self):
+        # The log fits T on raw_probabilities, so they must be the engine's
+        # output untouched by the T currently in force.
+        pred = self._service(2.0).predict("A", "B")
+        self.assertEqual(
+            pred["raw_probabilities"],
+            {"home_win": 0.7, "draw": 0.2, "away_win": 0.1},
+        )
+        self.assertLess(pred["outcome_probabilities"]["home_win"], 0.7)
+
 
 class TestMarketBlend(unittest.TestCase):
     """predict() blends bookmaker-implied probabilities into the outcome

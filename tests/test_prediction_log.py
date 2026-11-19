@@ -109,19 +109,57 @@ class TestPredictionLog(unittest.TestCase):
         prediction_log._entries = None
         self.assertIn("PL|1", prediction_log._load())
 
-    def _settled(self, n, probs, result_for, league="PL"):
-        """Inject n settled log entries sharing `probs` — the calibration
-        fit only reads settled rows, so they don't need record/settle."""
+    def _settled(self, n, probs, result_for, league="PL", shown=None, raw=True):
+        """Inject n settled log entries whose uncalibrated (r_*) probs are
+        `probs` and whose displayed (p_*) probs are `shown` (default the
+        same) — the calibration fit only reads settled rows, so they don't
+        need record/settle. `raw=False` mimics entries logged before r_*."""
+        shown = shown or probs
         entries = prediction_log._load()
         for i in range(n):
-            entries[f"{league}|{i}"] = {
+            e = {
                 "league": league, "match_id": str(i),
                 "home_team": "A", "away_team": "B",
                 "date": (sast_now() - timedelta(days=1)).isoformat(),
                 "predicted_at": sast_now().isoformat(), "model": "x",
-                "p_home": probs[0], "p_draw": probs[1], "p_away": probs[2],
+                "p_home": shown[0], "p_draw": shown[1], "p_away": shown[2],
                 "home_score": 1, "away_score": 0, "result": result_for(i),
             }
+            if raw:
+                e.update(r_home=probs[0], r_draw=probs[1], r_away=probs[2])
+            entries[f"{league}|{i}"] = e
+
+    def test_record_stores_raw_probabilities(self):
+        pred = _pred(0.45, 0.28, 0.27)
+        pred["raw_probabilities"] = {"home_win": 0.6, "draw": 0.2, "away_win": 0.2}
+        prediction_log.record("PL", [(self._fixture("11", "A", "B", 2), pred)])
+        e = prediction_log._load()["PL|11"]
+        self.assertEqual((e["r_home"], e["r_draw"], e["r_away"]), (0.6, 0.2, 0.2))
+        self.assertAlmostEqual(e["p_home"], 0.45)
+
+    def test_temperature_fits_raw_not_displayed(self):
+        # Displayed probs were already flattened by an earlier T and look
+        # calibrated; the raw model is still overconfident. Fitting on p_*
+        # would return None and switch calibration off — the fit must keep
+        # flagging the raw model's overconfidence.
+        self._settled(
+            150, (0.9, 0.05, 0.05),
+            lambda i: "home_win" if i < 75 else ("draw" if i < 120 else "away_win"),
+            shown=(0.5, 0.3, 0.2),
+        )
+        T = prediction_log.temperature("PL", min_n=100)
+        self.assertIsNotNone(T)
+        self.assertGreater(T, 1.0)
+
+    def test_temperature_ignores_entries_without_raw(self):
+        # Legacy entries carry only post-calibration p_*; they must not
+        # count toward the sample floor or the fit.
+        self._settled(
+            150, (0.9, 0.05, 0.05),
+            lambda i: "home_win" if i < 75 else "away_win",
+            raw=False,
+        )
+        self.assertIsNone(prediction_log.temperature("PL", min_n=100))
 
     def test_temperature_none_below_sample_floor(self):
         self._settled(50, (0.5, 0.3, 0.2), lambda i: "home_win")

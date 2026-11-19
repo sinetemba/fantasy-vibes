@@ -106,6 +106,13 @@ def record(league: str, pairs: Iterable[Tuple[Dict[str, Any], Dict[str, Any]]]) 
                 "p_away": probs.get("away_win", 0.0),
                 "result": None,
             }
+            # Uncalibrated model probs (before temperature scaling and the
+            # market blend) — the only input temperature() fits on.
+            raw_probs = pred.get("raw_probabilities")
+            if raw_probs:
+                entry["r_home"] = raw_probs.get("home_win")
+                entry["r_draw"] = raw_probs.get("draw")
+                entry["r_away"] = raw_probs.get("away_win")
             # Pre-blend model probs and the market probs blended in — p_*
             # is what users saw, but scoring the blend against the market
             # it contains is circular. Keeping the components lets the
@@ -212,16 +219,22 @@ def temperature(league: str, days: int = 120, min_n: int = 120) -> Optional[floa
     A league-specific fit requires `min_n` settled entries; below that the
     pooled fit across every settled league is used instead, so low-volume
     competitions still benefit from calibration. None when neither pool
-    reaches `min_n` or when the fitted T ~ 1 (nothing to correct)."""
-    entries = _settled_entries(days)
-    league_rows = [
-        (e["p_home"], e["p_draw"], e["p_away"], e["result"])
-        for e in entries
-        if e["league"] == league
+    reaches `min_n` or when the fitted T ~ 1 (nothing to correct).
+
+    Fits only on the uncalibrated r_* probabilities. p_* has already been
+    scaled by the T in force when it was logged (and possibly blended with
+    the market), so fitting on it would find T ~ 1 once calibration works,
+    switch calibration off, and oscillate. Entries without r_* (logged
+    before it was recorded) are skipped."""
+    rows = [
+        (e["r_home"], e["r_draw"], e["r_away"], e["result"], e["league"])
+        for e in _settled_entries(days)
+        if e.get("r_home") is not None
+        and e.get("r_draw") is not None
+        and e.get("r_away") is not None
     ]
-    pooled_rows = [
-        (e["p_home"], e["p_draw"], e["p_away"], e["result"]) for e in entries
-    ]
+    league_rows = [r[:4] for r in rows if r[4] == league]
+    pooled_rows = [r[:4] for r in rows]
     if len(league_rows) >= min_n:
         T = _fit_temperature(league_rows)
     elif len(pooled_rows) >= min_n:

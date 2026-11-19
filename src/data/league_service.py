@@ -1063,6 +1063,12 @@ class LeagueService:
         # Calibrate outcome probabilities against this league's settled
         # log: T > 1 flattens an overconfident model, T < 1 sharpens an
         # under-confident one. The score matrix stays model-derived.
+        # The uncalibrated distribution is kept for the log: T is fitted
+        # on it, so fitting never sees output this T already corrected.
+        raw = pred.get("outcome_probabilities") or {}
+        pred["raw_probabilities"] = {
+            k: float(raw.get(k) or 0.0) for k in ("home_win", "draw", "away_win")
+        }
         T = getattr(self, "_calibration_T", None)
         if T:
             probs = pred.get("outcome_probabilities") or {}
