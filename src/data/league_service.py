@@ -18,9 +18,16 @@ from .prediction_engine import (
     _rounded_probs,
     _TEAM_KEY_ALIASES,
     fixtures_equivalent,
+    teams_equivalent,
 )
-from . import prediction_log
-from .utils import apply_postponements, compute_table, sast_now, stale_served_since
+from . import odds, prediction_log
+from .utils import (
+    apply_postponements,
+    compute_table,
+    is_upcoming,
+    sast_now,
+    stale_served_since,
+)
 from .sources.bbc import BBCSource
 from .sources.composite import CompositeDataSource
 from .sources.fixture_download import FixtureDownloadSource
@@ -36,11 +43,21 @@ LEAGUES_PATH = PROJECT_ROOT / "data" / "leagues.json"
 MODEL_CACHE_DIR = PROJECT_ROOT / "data" / "cache"
 MODEL_TTL = 1800  # seconds
 GROUP_CACHE_TTL = 300  # seconds — group pages refetch at most this often
+# A refresh producing no live or upcoming fixtures AND nothing played in
+# the last N days means the feed stopped updating or the season ended —
+# flag it so the UI can say so instead of silently showing an old season.
+FEED_GAP_DAYS = 21
 NATIONAL_RANKINGS_PATH = PROJECT_ROOT / "data" / "national_rankings.json"
 TEAM_VALUES_PATH = PROJECT_ROOT / "data" / "team_values.json"
 # Elo points per natural-log unit of squad market value above/below the
 # file's geometric mean — a club worth 2.7x the median starts ~+90.
 VALUE_ELO_PER_LN = 90.0
+
+# Share of the outcome probabilities given to bookmaker-implied odds when
+# they exist for the fixture. The market is the strongest single public
+# signal, but half weight keeps the model's independent view — tune this
+# once the log accumulates blended predictions to score against.
+MARKET_BLEND_WEIGHT = 0.5
 
 # Matches youth/reserve/women's sides in international feeds,
 # e.g. "Portugal U17", "Germany U21", "England Women".
@@ -175,6 +192,24 @@ def dedupe_matches(
     return unique
 
 
+def _fixture_end_date(matches: List[Dict[str, Any]]) -> Optional[str]:
+    """Newest fixture date (ISO day) when the data looks historical:
+    no live or upcoming fixtures and nothing played within FEED_GAP_DAYS.
+    Means the feed stopped updating or the season ended — either way the
+    user should know they're looking at an old window. None when current."""
+    if not matches:
+        return None
+    for m in matches:
+        if m.get("status") in ("live", "half_time") or is_upcoming(m):
+            return None
+    newest = max((m.get("date") or "")[:10] for m in matches)
+    try:
+        age = (sast_now().date() - date.fromisoformat(newest)).days
+    except ValueError:
+        return None
+    return newest if age > FEED_GAP_DAYS else None
+
+
 def _senior_teams_only(matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [
         m
@@ -268,6 +303,10 @@ class LeagueService:
         # True when the last fetch had to serve expired cache — the data is
         # older than its TTL implies and the UI should say so.
         self.data_stale = False
+        # ISO date of the newest fixture when the data looks historical —
+        # no live/upcoming matches and nothing recent played. None when
+        # the feed is current.
+        self.data_ends_on: Optional[str] = None
         self._standings_source_name = None
         self._engine = PredictionEngine()
         # Signature of the results the current engine was trained on.
@@ -372,6 +411,7 @@ class LeagueService:
             self._group_match_cache.clear()
             self.last_refreshed = time.time()
             self.data_stale = bool(stale_served_since(fetch_started))
+            self.data_ends_on = _fixture_end_date(matches)
 
     def _fetch_historical(self, match_source: Optional[str]) -> List[Dict[str, Any]]:
         """Pull configured historical/archived seasons as extra training data."""
@@ -602,6 +642,7 @@ class LeagueService:
             self._group_match_cache.clear()
             self.last_refreshed = time.time()
             self.data_stale = bool(stale_served_since(fetch_started))
+            self.data_ends_on = _fixture_end_date(matches)
 
     def _apply_results_to_standings(
         self, standings: List[Dict[str, Any]], results: List[Dict[str, Any]]
@@ -1036,7 +1077,71 @@ class LeagueService:
                 "draw": d,
                 "away_win": a,
             }
+        # Market blend: bookmaker-implied probabilities are the strongest
+        # single public signal — where odds exist for the fixture they get
+        # a fixed share of the outcome distribution. Skipped for neutral
+        # venue: the market prices the actual venue, not a hypothetical.
+        market = None if neutral else self._market_probs(home, away)
+        if market:
+            w = MARKET_BLEND_WEIGHT
+            probs = pred.get("outcome_probabilities") or {}
+            # Keep the pre-blend distribution: the log records it so the
+            # About page can score the model separately from the blend —
+            # otherwise the model-vs-market comparison quietly circularises.
+            pred["model_probabilities"] = {
+                k: float(probs.get(k) or 0.0)
+                for k in ("home_win", "draw", "away_win")
+            }
+            h, d, a = _rounded_probs(
+                *(
+                    (1.0 - w) * float(probs.get(k) or 0.0) + w * market[i]
+                    for i, k in enumerate(("home_win", "draw", "away_win"))
+                )
+            )
+            pred["outcome_probabilities"] = {
+                "home_win": h,
+                "draw": d,
+                "away_win": a,
+            }
+            mh, md, ma = _rounded_probs(*market)
+            pred["market_probabilities"] = {
+                "home_win": mh,
+                "draw": md,
+                "away_win": ma,
+                "weight": w,
+            }
         return pred
+
+    def _market_probs(self, home: str, away: str) -> Optional[Tuple[float, float, float]]:
+        """Implied pre-match odds for the scheduled fixture between these
+        two teams (same venue orientation), when the league is covered by
+        the odds feed. The fixture's own row provides the match date —
+        user-picked pairings with no real fixture get no market."""
+        if self._current_code not in odds.LEAGUE_DIV:
+            return None
+        fixture = min(
+            (
+                m
+                for m in getattr(self, "matches", None) or []
+                if m.get("status") == "scheduled"
+                and teams_equivalent(home, m.get("home_team", ""))
+                and teams_equivalent(away, m.get("away_team", ""))
+            ),
+            key=lambda m: m.get("date") or "",
+            default=None,
+        )
+        if fixture is None:
+            return None
+        try:
+            return odds.market_probs(
+                self._current_code,
+                fixture.get("home_team"),
+                fixture.get("away_team"),
+                fixture.get("date"),
+            )
+        except Exception as exc:
+            logger.debug(f"Market odds lookup failed: {exc}")
+            return None
 
     def predict_fixture(
         self, match: Dict[str, Any], neutral: bool = False, log: bool = True

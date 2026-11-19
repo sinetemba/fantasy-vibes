@@ -124,12 +124,22 @@ _TEAM_TRANSLIT = str.maketrans(
 )
 
 
+# Single-token spellings that differ across feeds, normalised to the
+# longer form: "St Etienne" vs "Saint-Étienne", "Newcastle Utd" vs
+# "Newcastle United".
+_TEAM_TOKEN_SUBS = {
+    "st": "saint",
+    "utd": "united",
+}
+
+
 def _norm_key(name: str) -> str:
     """Normalise a team name for cross-source / cross-competition matching."""
     decomposed = unicodedata.normalize("NFKD", name.translate(_TEAM_TRANSLIT))
     ascii_name = "".join(c for c in decomposed if not unicodedata.combining(c))
     tokens = re.sub(r"[^a-z0-9 ]", " ", ascii_name.lower()).split()
     tokens = [t for t in tokens if t not in TEAM_STOP_TOKENS and not t.isdigit()]
+    tokens = [_TEAM_TOKEN_SUBS.get(t, t) for t in tokens]
     return " ".join(tokens) or name.lower().strip()
 
 
@@ -160,6 +170,18 @@ _TEAM_KEY_ALIASES = {
     "holland": "netherlands",
     "dr congo": "congo dr",
     "democratic republic of congo": "congo dr",
+    # football-data.co.uk odds CSV spellings (also feed variants they unify).
+    "nott m forest": "nottingham forest",
+    "ath bilbao": "athletic bilbao",
+    "athletic": "athletic bilbao",
+    "ath madrid": "atletico madrid",
+    "sp gijon": "sporting gijon",
+    "espanol": "espanyol",
+    "brest": "stade brestois",
+    "lyon": "olympique lyonnais",
+    "bayern munich": "bayern munchen",
+    "hamburg": "hamburger",
+    "west brom": "west bromwich albion",
 }
 
 # Markers that distinguish otherwise identical names — a "Germany U21"

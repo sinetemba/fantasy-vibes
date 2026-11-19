@@ -257,6 +257,12 @@ def render_sidebar():
         st.caption(f"🕒 Data updated {_updated_ago(getattr(service, 'last_refreshed', None))}")
         if getattr(service, "data_stale", False):
             st.caption("⚠️ A data feed is down — showing cached results. Refresh to retry.")
+        ends_on = getattr(service, "data_ends_on", None)
+        if ends_on:
+            st.caption(
+                f"📅 No upcoming fixtures — data ends {ends_on} "
+                "(off-season or a stale feed)."
+            )
         if st.button("🔄 Refresh data", use_container_width=True):
             with st.spinner("Refreshing…"):
                 service.refresh()

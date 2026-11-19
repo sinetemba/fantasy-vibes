@@ -10,6 +10,7 @@ from app.ui import (
     display_disclaimer,
     display_header,
     form_badges_html,
+    market_note,
     outcome_bar_html,
     prediction_caveat,
     prediction_reasons,
@@ -108,6 +109,9 @@ def _display_prediction(pred, service: LeagueService):
     reasons = prediction_reasons(pred)
     if reasons:
         st.markdown(reasons)
+    market = market_note(pred)
+    if market:
+        st.caption(market)
     caveat = prediction_caveat(pred)
     if caveat:
         st.warning(caveat)

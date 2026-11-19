@@ -1,15 +1,18 @@
 """Tests for LeagueService helpers and composite source tracking."""
 
 import unittest
+from datetime import timedelta
 from unittest import mock
 
-from src.data import prediction_log
+from src.data import odds, prediction_log
 from src.data.league_service import (
     LeagueService,
+    _fixture_end_date,
     _memo_get,
     _memo_put,
     _results_signature,
 )
+from src.data.utils import sast_now
 from src.data.sources.composite import CompositeDataSource
 
 
@@ -181,6 +184,128 @@ class TestPredictionCalibration(unittest.TestCase):
         probs = pred["outcome_probabilities"]
         self.assertGreater(probs["home_win"], 0.7)
         self.assertAlmostEqual(sum(probs.values()), 1.0)
+
+
+class TestMarketBlend(unittest.TestCase):
+    """predict() blends bookmaker-implied probabilities into the outcome
+    distribution when odds exist for the scheduled fixture."""
+
+    class _FakeEngine:
+        fitted = True
+        teams = {"Arsenal", "Chelsea"}
+
+        def resolve_name(self, name):
+            return name
+
+        def predict(self, home, away, neutral=False, competition=None, contexts=None):
+            return {
+                "model": "test",
+                "outcome_probabilities": {
+                    "home_win": 0.6, "draw": 0.2, "away_win": 0.2
+                },
+            }
+
+    def _service(self):
+        svc = LeagueService.__new__(LeagueService)
+        svc._engine = self._FakeEngine()
+        svc._team_contexts = {}
+        svc._current_code = "PL"
+        svc._calibration_T = None
+        svc.matches = [
+            {
+                "match_id": "m1", "home_team": "Arsenal FC",
+                "away_team": "Chelsea", "status": "scheduled",
+                "date": "2026-11-22T15:00:00",
+            }
+        ]
+        return svc
+
+    def test_blends_market_probs(self):
+        svc = self._service()
+        with mock.patch.object(odds, "market_probs", return_value=(0.2, 0.2, 0.6)):
+            pred = svc.predict("Arsenal", "Chelsea")
+        probs = pred["outcome_probabilities"]
+        # 50/50 blend of model (0.6,0.2,0.2) and market (0.2,0.2,0.6).
+        self.assertAlmostEqual(probs["home_win"], 0.4)
+        self.assertAlmostEqual(probs["away_win"], 0.4)
+        self.assertAlmostEqual(sum(probs.values()), 1.0)
+        self.assertEqual(pred["market_probabilities"]["weight"], 0.5)
+        self.assertEqual(pred["market_probabilities"]["away_win"], 0.6)
+        # The pre-blend distribution is preserved for honest benchmarking.
+        self.assertEqual(pred["model_probabilities"]["home_win"], 0.6)
+        self.assertEqual(pred["model_probabilities"]["away_win"], 0.2)
+
+    def test_no_market_leaves_probs(self):
+        svc = self._service()
+        with mock.patch.object(odds, "market_probs", return_value=None):
+            pred = svc.predict("Arsenal", "Chelsea")
+        self.assertEqual(pred["outcome_probabilities"]["home_win"], 0.6)
+        self.assertNotIn("market_probabilities", pred)
+
+    def test_neutral_venue_skips_market(self):
+        svc = self._service()
+        with mock.patch.object(odds, "market_probs", return_value=(0.2, 0.2, 0.6)) as mp:
+            svc.predict("Arsenal", "Chelsea", neutral=True)
+        mp.assert_not_called()
+
+    def test_reversed_fixture_not_blended(self):
+        # "Chelsea vs Arsenal" odds don't price the user-picked
+        # Arsenal-home hypothetical — venue orientation must match.
+        svc = self._service()
+        svc.matches[0]["home_team"], svc.matches[0]["away_team"] = "Chelsea", "Arsenal FC"
+        with mock.patch.object(odds, "market_probs") as mp:
+            svc.predict("Arsenal", "Chelsea")
+        mp.assert_not_called()
+
+    def test_uncovered_league_skips_market(self):
+        svc = self._service()
+        svc._current_code = "PSL"
+        with mock.patch.object(odds, "market_probs") as mp:
+            svc.predict("Arsenal", "Chelsea")
+        mp.assert_not_called()
+
+
+class TestFixtureEndDate(unittest.TestCase):
+    """Feed-gap detection: flag data with no live/upcoming fixtures and
+    nothing played recently (dead feed or ended season)."""
+
+    def _m(self, status, days_offset, **extra):
+        return {
+            "status": status,
+            "date": (sast_now() + timedelta(days=days_offset)).isoformat(),
+            "home_team": "A", "away_team": "B",
+            **extra,
+        }
+
+    def test_historical_only_returns_newest_date(self):
+        matches = [
+            self._m("full_time", -40, home_score=1, away_score=0),
+            self._m("full_time", -30, home_score=2, away_score=2),
+        ]
+        expected = (sast_now() - timedelta(days=30)).date().isoformat()
+        self.assertEqual(_fixture_end_date(matches), expected)
+
+    def test_upcoming_fixture_clears_flag(self):
+        matches = [
+            self._m("full_time", -40, home_score=1, away_score=0),
+            self._m("scheduled", 5),
+        ]
+        self.assertIsNone(_fixture_end_date(matches))
+
+    def test_live_match_clears_flag(self):
+        matches = [
+            self._m("full_time", -40, home_score=1, away_score=0),
+            self._m("live", 0),
+        ]
+        self.assertIsNone(_fixture_end_date(matches))
+
+    def test_recent_results_no_flag(self):
+        matches = [self._m("full_time", -5, home_score=1, away_score=0)]
+        self.assertIsNone(_fixture_end_date(matches))
+
+    def test_empty_and_undated(self):
+        self.assertIsNone(_fixture_end_date([]))
+        self.assertIsNone(_fixture_end_date([{"status": "full_time", "date": ""}]))
 
 
 if __name__ == "__main__":

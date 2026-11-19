@@ -93,7 +93,7 @@ def record(league: str, pairs: Iterable[Tuple[Dict[str, Any], Dict[str, Any]]]) 
                     key,
                 )
             probs = pred.get("outcome_probabilities") or {}
-            entries[key] = {
+            entry = {
                 "league": league,
                 "match_id": mid,
                 "home_team": m.get("home_team"),
@@ -106,6 +106,21 @@ def record(league: str, pairs: Iterable[Tuple[Dict[str, Any], Dict[str, Any]]]) 
                 "p_away": probs.get("away_win", 0.0),
                 "result": None,
             }
+            # Pre-blend model probs and the market probs blended in — p_*
+            # is what users saw, but scoring the blend against the market
+            # it contains is circular. Keeping the components lets the
+            # benchmark honestly split model vs blend vs market.
+            model_probs = pred.get("model_probabilities")
+            if model_probs:
+                entry["m_home"] = model_probs.get("home_win")
+                entry["m_draw"] = model_probs.get("draw")
+                entry["m_away"] = model_probs.get("away_win")
+            market_probs = pred.get("market_probabilities")
+            if market_probs:
+                entry["k_home"] = market_probs.get("home_win")
+                entry["k_draw"] = market_probs.get("draw")
+                entry["k_away"] = market_probs.get("away_win")
+            entries[key] = entry
             changed = True
         if changed:
             _save(entries)
@@ -149,23 +164,21 @@ def settle(league: str, matches: List[Dict[str, Any]]) -> None:
 _RESULT_IDX = {"home_win": 0, "draw": 1, "away_win": 2}
 
 
-def temperature(league: str, days: int = 120, min_n: int = 120) -> Optional[float]:
-    """Temperature that rescales this league's logged probabilities to
-    match observed outcomes: T > 1 means the model is overconfident and
-    its predictions should be flattened toward uniform. Golden-section
-    search on negative log-likelihood over settled entries; None below
-    the sample floor or when ~1 (nothing to correct)."""
+def _settled_entries(days: int) -> List[Dict[str, Any]]:
+    """Settled log entries whose kickoff fell within the last `days` days."""
     cutoff = sast_now() - timedelta(days=days)
     with _lock:
-        rows = [
-            (e["p_home"], e["p_draw"], e["p_away"], e["result"])
+        return [
+            dict(e)
             for e in _load().values()
-            if e["league"] == league
-            and e.get("result") in _RESULT_IDX
+            if e.get("result") in _RESULT_IDX
             and (kickoff_sast(e["date"]) or cutoff) > cutoff
         ]
-    if len(rows) < min_n:
-        return None
+
+
+def _fit_temperature(rows: List[Tuple[float, float, float, str]]) -> float:
+    """Golden-section search for the temperature minimising NLL of the
+    (p_home, p_draw, p_away, result) rows."""
 
     def nll(T: float) -> float:
         loss = 0.0
@@ -188,7 +201,33 @@ def temperature(league: str, days: int = 120, min_n: int = 120) -> Optional[floa
             lo, x1, f1 = x1, x2, f2
             x2 = lo + gr * (hi - lo)
             f2 = nll(x2)
-    T = (lo + hi) / 2.0
+    return (lo + hi) / 2.0
+
+
+def temperature(league: str, days: int = 120, min_n: int = 120) -> Optional[float]:
+    """Temperature that rescales this league's logged probabilities to
+    match observed outcomes: T > 1 means the model is overconfident and
+    its predictions should be flattened toward uniform.
+
+    A league-specific fit requires `min_n` settled entries; below that the
+    pooled fit across every settled league is used instead, so low-volume
+    competitions still benefit from calibration. None when neither pool
+    reaches `min_n` or when the fitted T ~ 1 (nothing to correct)."""
+    entries = _settled_entries(days)
+    league_rows = [
+        (e["p_home"], e["p_draw"], e["p_away"], e["result"])
+        for e in entries
+        if e["league"] == league
+    ]
+    pooled_rows = [
+        (e["p_home"], e["p_draw"], e["p_away"], e["result"]) for e in entries
+    ]
+    if len(league_rows) >= min_n:
+        T = _fit_temperature(league_rows)
+    elif len(pooled_rows) >= min_n:
+        T = _fit_temperature(pooled_rows)
+    else:
+        return None
     return None if abs(T - 1.0) < 0.05 else round(T, 3)
 
 
@@ -196,12 +235,7 @@ def summary(days: int = 30) -> Dict[str, Any]:
     """Accuracy of settled predictions whose kickoff fell in the last
     `days` days: hit rate (likeliest outcome), Brier score, log-loss and
     the hit rate of always picking the home side, for context."""
-    cutoff = sast_now() - timedelta(days=days)
-    with _lock:
-        settled = [
-            dict(e) for e in _load().values()
-            if e.get("result") and (kickoff_sast(e["date"]) or cutoff) > cutoff
-        ]
+    settled = _settled_entries(days)
     n = len(settled)
     if not n:
         return {"n": 0, "days": days}

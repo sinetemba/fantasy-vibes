@@ -61,6 +61,30 @@ class TestPredictionLog(unittest.TestCase):
         self.assertAlmostEqual(report["home_baseline"], 0.5)
         self.assertEqual(report["per_league"]["PL"], (0.5, 2))
 
+    def test_record_stores_blend_components(self):
+        # p_* is the blended distribution shown to users; m_* is the raw
+        # model and k_* the market — both kept so benchmarking stays honest.
+        pred = _pred(0.45, 0.26, 0.29)
+        pred["model_probabilities"] = {
+            "home_win": 0.4, "draw": 0.25, "away_win": 0.35
+        }
+        pred["market_probabilities"] = {
+            "home_win": 0.5, "draw": 0.27, "away_win": 0.23, "weight": 0.5
+        }
+        prediction_log.record("PL", [(self._fixture("9", "A", "B", 2), pred)])
+        e = prediction_log._load()["PL|9"]
+        self.assertAlmostEqual(e["p_away"], 0.29)
+        self.assertEqual((e["m_home"], e["m_draw"], e["m_away"]), (0.4, 0.25, 0.35))
+        self.assertEqual((e["k_home"], e["k_away"]), (0.5, 0.23))
+
+    def test_record_without_blend_omits_components(self):
+        prediction_log.record("PL", [
+            (self._fixture("10", "A", "B", 2), _pred(0.5, 0.3, 0.2)),
+        ])
+        e = prediction_log._load()["PL|10"]
+        self.assertNotIn("m_home", e)
+        self.assertNotIn("k_home", e)
+
     def test_same_fixture_from_another_feed_overwrites(self):
         prediction_log.record("PL", [
             (self._fixture("fd-1", "Manchester City", "Arsenal FC", 1), _pred(0.5, 0.3, 0.2)),
@@ -85,13 +109,13 @@ class TestPredictionLog(unittest.TestCase):
         prediction_log._entries = None
         self.assertIn("PL|1", prediction_log._load())
 
-    def _settled(self, n, probs, result_for):
+    def _settled(self, n, probs, result_for, league="PL"):
         """Inject n settled log entries sharing `probs` — the calibration
         fit only reads settled rows, so they don't need record/settle."""
         entries = prediction_log._load()
         for i in range(n):
-            entries[f"PL|{i}"] = {
-                "league": "PL", "match_id": str(i),
+            entries[f"{league}|{i}"] = {
+                "league": league, "match_id": str(i),
                 "home_team": "A", "away_team": "B",
                 "date": (sast_now() - timedelta(days=1)).isoformat(),
                 "predicted_at": sast_now().isoformat(), "model": "x",
@@ -117,6 +141,33 @@ class TestPredictionLog(unittest.TestCase):
         self._settled(
             150, (0.5, 0.3, 0.2),
             lambda i: "home_win" if i < 75 else ("draw" if i < 120 else "away_win"),
+        )
+        self.assertIsNone(prediction_log.temperature("PL", min_n=100))
+
+    def test_temperature_pooled_fallback(self):
+        # A league below the sample floor still calibrates when the pooled
+        # log has enough settled entries — 150 overconfident BL1 rows give
+        # a pooled T > 1 that thin-league "PL" inherits.
+        self._settled(
+            150, (0.9, 0.05, 0.05),
+            lambda i: "home_win" if i < 75 else "away_win",
+            league="BL1",
+        )
+        T = prediction_log.temperature("PL", min_n=100)
+        self.assertIsNotNone(T)
+        self.assertGreater(T, 1.0)
+
+    def test_temperature_prefers_league_fit(self):
+        # PL rows are well-calibrated (T ~ 1) while BL1 is overconfident;
+        # with enough PL rows the pooled miscalibration must not leak in.
+        self._settled(
+            150, (0.5, 0.3, 0.2),
+            lambda i: "home_win" if i < 75 else ("draw" if i < 120 else "away_win"),
+        )
+        self._settled(
+            150, (0.9, 0.05, 0.05),
+            lambda i: "home_win" if i < 75 else "away_win",
+            league="BL1",
         )
         self.assertIsNone(prediction_log.temperature("PL", min_n=100))
 

@@ -356,6 +356,22 @@ def team_strength_lines(pred: Dict, home: Optional[str] = None, away: Optional[s
     ]
 
 
+def market_note(pred: Dict) -> str:
+    """'Blended with bookmaker odds (50%): home 48% · draw 26% · away 26%'
+    — shown when the prediction includes market-implied probabilities."""
+    mp = pred.get("market_probabilities")
+    if not mp:
+        return ""
+    h, d, a = _whole_percents(
+        mp.get("home_win", 0), mp.get("draw", 0), mp.get("away_win", 0)
+    )
+    weight = int(round((mp.get("weight") or 0.5) * 100))
+    return (
+        f"Blended with bookmaker odds ({weight}% weight): "
+        f"home {h}% · draw {d}% · away {a}%"
+    )
+
+
 def prediction_summary_html(
     pred: Dict, home: Optional[str] = None, away: Optional[str] = None
 ) -> str:
@@ -363,6 +379,7 @@ def prediction_summary_html(
     outcome bar, likeliest scores, reasons and any data caveat."""
     reasons = prediction_reasons(pred, home, away)
     caveat = prediction_caveat(pred)
+    market = market_note(pred)
     muted = "font-size:0.8rem;color:var(--fv-muted);margin-top:0.3rem;"
     return (
         f"<div style='font-weight:700;font-size:1rem;margin-top:0.5rem;'>"
@@ -370,6 +387,7 @@ def prediction_summary_html(
         f"{outcome_bar_html(pred, home, away)}"
         f"<div style='font-size:0.85rem;margin-top:0.4rem;'>{safe_html(scorelines_text(pred))}</div>"
         + (f"<div style='{muted}'>{safe_html(reasons)}</div>" if reasons else "")
+        + (f"<div style='{muted}'>{safe_html(market)}</div>" if market else "")
         + (f"<div style='{muted}color:#f1c40f;'>{safe_html(caveat)}</div>" if caveat else "")
     )
 
