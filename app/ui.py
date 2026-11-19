@@ -184,6 +184,10 @@ OUTCOME_COLORS = {"home": "#3b8fd9", "draw": "#8a8f98", "away": "#f39c34"}
 VERDICT_COIN_FLIP_GAP = 0.05
 VERDICT_SLIGHT_GAP = 0.15
 VERDICT_STRONG_GAP = 0.30
+# The model almost never makes the draw its likeliest outcome, yet when the
+# favourite leads the draw by under this margin the logged draw rate roughly
+# doubles (~32% vs ~18% overall) — so the headline names the draw as live.
+VERDICT_DRAW_LIVE_GAP = 0.15
 
 
 def _whole_percents(*probs: float) -> List[int]:
@@ -212,14 +216,16 @@ def _team_labels(pred: Dict, home: Optional[str], away: Optional[str]):
 
 
 def prediction_verdict(pred: Dict, home: Optional[str] = None, away: Optional[str] = None) -> str:
-    """Plain-language headline, e.g. 'Arsenal slight favourites' or
-    'Coin flip', from the gap between the two likeliest outcomes."""
+    """Plain-language headline, e.g. 'Arsenal slight favourites',
+    'Close call: Arsenal or a draw' or 'Coin flip', from the gaps between
+    the likeliest outcome, the runner-up and the draw."""
     home, away = _team_labels(pred, home, away)
     outcome = pred.get("outcome_probabilities") or {}
+    draw_p = outcome.get("draw", 0) or 0
     ranked = sorted(
         (
             (outcome.get("home_win", 0), home),
-            (outcome.get("draw", 0), None),
+            (draw_p, None),
             (outcome.get("away_win", 0), away),
         ),
         key=lambda x: x[0],
@@ -227,10 +233,12 @@ def prediction_verdict(pred: Dict, home: Optional[str] = None, away: Optional[st
     )
     (top, team), (second, _) = ranked[0], ranked[1]
     gap = top - second
+    if team is None:
+        return "Coin flip" if gap < VERDICT_COIN_FLIP_GAP else "Draw the likeliest result"
+    if top - draw_p < VERDICT_DRAW_LIVE_GAP:
+        return f"Close call: {team} or a draw"
     if gap < VERDICT_COIN_FLIP_GAP:
         return "Coin flip"
-    if team is None:
-        return "Draw the likeliest result"
     if gap < VERDICT_SLIGHT_GAP:
         return f"{team} slight favourites"
     if gap < VERDICT_STRONG_GAP:
@@ -331,6 +339,11 @@ def prediction_caveat(pred: Dict) -> str:
     empty when it doesn't."""
     note = staleness_note(pred)
     if pred.get("model") == "elo_fallback":
+        unrated = pred.get("unrated_teams") or []
+        if unrated:
+            note = " · ".join(
+                b for b in (f"no rating for {', '.join(unrated)}", note) if b
+            )
         return "⚠️ Limited data: rating-only estimate" + (f" · {note}" if note else "")
     return f"⚠️ Data caveat — {note}" if note else ""
 

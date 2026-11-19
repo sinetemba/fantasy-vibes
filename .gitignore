@@ -16,3 +16,8 @@ data/cache/*.json
 /bt_*.txt
 /retrain_*.txt
 /tune_*.txt
+
+# Prediction log (the app's track record) and its daily backups — local state
+/data/prediction_log.json
+/data/prediction_log.corrupt-*.json
+/data/backups/

@@ -42,9 +42,33 @@ def render(service: LeagueService):
         _render_market_benchmark(days)
 
     _render_history(days, service)
+    _render_unrated(days)
 
     st.markdown("---")
     display_disclaimer()
+
+
+def _render_unrated(days: int) -> None:
+    """Teams predicted with no rating at all — shown so gaps in the
+    rankings/alias data are visible instead of silently weakening picks."""
+    rows = prediction_log.unrated_teams(days=days)
+    if not rows:
+        return
+    with st.expander(f"⚠️ Teams the model couldn't rate ({len(rows)})"):
+        st.caption(
+            "These teams had no match history and no ranking prior, so their "
+            "predictions used a generic default rating and are less reliable."
+        )
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {"League": league_name(lg), "Team": team, "Predictions": n}
+                    for lg, team, n in rows
+                ]
+            ),
+            hide_index=True,
+            use_container_width=True,
+        )
 
 
 def _pct(x: float) -> str:

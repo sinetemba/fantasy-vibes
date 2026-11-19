@@ -272,6 +272,40 @@ class TestPredictionLog(unittest.TestCase):
         self.assertTrue(rows[1]["correct"])
         self.assertEqual(len(prediction_log.history(days=30)), 3)
 
+    def test_unrated_teams_are_logged_and_counted(self):
+        pred = dict(_pred(0.4, 0.3, 0.3), model="elo_fallback", unrated_teams=["Ghost FC"])
+        prediction_log.record("INTF", [
+            (self._fixture("u1", "Ghost FC", "B", 1), pred),
+            (self._fixture("u2", "C", "Ghost FC", 2), pred),
+            (self._fixture("u3", "C", "D", 2), _pred(0.4, 0.3, 0.3)),
+        ])
+        self.assertEqual(prediction_log.unrated_teams(days=30), [("INTF", "Ghost FC", 2)])
+
+    def test_log_is_outside_the_cache_dir(self):
+        self.assertNotEqual(prediction_log.LOG_PATH.parent.name, "cache")
+
+    def test_legacy_log_is_migrated(self):
+        legacy = prediction_log._legacy_path()
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text('{"version": 1, "entries": {"PL|1": {"league": "PL"}}}', encoding="utf-8")
+        self.assertIn("PL|1", prediction_log._load())
+        self.assertFalse(legacy.exists())
+        self.assertTrue(prediction_log.LOG_PATH.exists())
+
+    def test_corrupt_log_is_set_aside_not_overwritten(self):
+        prediction_log.LOG_PATH.write_text("{not json", encoding="utf-8")
+        with self.assertLogs("src.data.prediction_log", "ERROR"):
+            self.assertEqual(prediction_log._load(), {})
+        aside = list(prediction_log.LOG_PATH.parent.glob("log.corrupt-*.json"))
+        self.assertEqual(len(aside), 1)
+        self.assertEqual(aside[0].read_text(encoding="utf-8"), "{not json")
+
+    def test_daily_backup_taken_on_save(self):
+        prediction_log.record("PL", [(self._fixture("1", "A", "B", 1), _pred(0.5, 0.3, 0.2))])
+        prediction_log.record("PL", [(self._fixture("2", "C", "D", 1), _pred(0.5, 0.3, 0.2))])
+        backups = list(prediction_log._backup_dir().glob("log-*.json"))
+        self.assertEqual(len(backups), 1)  # one per day, and only once a file existed
+
     def test_retention_keeps_a_season(self):
         self.assertGreaterEqual(prediction_log.RETENTION_DAYS, 365)
 

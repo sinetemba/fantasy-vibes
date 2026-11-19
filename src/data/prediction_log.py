@@ -6,7 +6,10 @@ import json
 import logging
 import math
 import os
+import shutil
 import threading
+import time
+from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -17,7 +20,12 @@ from .utils import sast_now, to_sast
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-LOG_PATH = PROJECT_ROOT / "data" / "cache" / "prediction_log.json"
+# Lives in data/, not data/cache/: the log is the app's only record of its
+# own track record and must not sit next to disposable HTTP cache files.
+LOG_PATH = PROJECT_ROOT / "data" / "prediction_log.json"
+# Daily snapshots kept under data/backups/ so a bad write or accidental
+# delete costs at most a day of entries.
+BACKUP_KEEP = 14
 # Settled and abandoned (never-played) entries are dropped after this long
 # — a full season, so the track record and history cover one.
 RETENTION_DAYS = 365
@@ -39,24 +47,78 @@ def kickoff_sast(raw: Optional[str]) -> Optional[datetime]:
     return to_sast(dt) if dt.tzinfo else dt
 
 
+def _legacy_path() -> Path:
+    """Where the log lived before it moved out of the cache directory."""
+    return LOG_PATH.parent / "cache" / LOG_PATH.name
+
+
+def _backup_dir() -> Path:
+    return LOG_PATH.parent / "backups"
+
+
+def _migrate_legacy() -> None:
+    legacy = _legacy_path()
+    if LOG_PATH.exists() or not legacy.exists():
+        return
+    try:
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(legacy, LOG_PATH)
+        logger.info(f"Moved prediction log {legacy} -> {LOG_PATH}")
+    except Exception as exc:
+        logger.warning(f"Could not move legacy prediction log: {exc}")
+
+
 def _load() -> Dict[str, Dict[str, Any]]:
     global _entries
     if _entries is None:
+        _migrate_legacy()
         try:
             with open(LOG_PATH, "r", encoding="utf-8") as f:
                 _entries = json.load(f).get("entries", {})
         except FileNotFoundError:
             _entries = {}
         except Exception as exc:
-            logger.warning(f"Prediction log unreadable, starting fresh: {exc}")
+            # Set the unreadable file aside rather than letting the next
+            # save overwrite it — it may be recoverable by hand.
+            aside = LOG_PATH.with_name(
+                f"{LOG_PATH.stem}.corrupt-{int(time.time())}{LOG_PATH.suffix}"
+            )
+            try:
+                os.replace(LOG_PATH, aside)
+            except Exception:
+                aside = None
+            logger.error(
+                f"Prediction log unreadable ({exc}); starting fresh"
+                + (f", original kept at {aside}" if aside else "")
+                + f". Daily backups are in {_backup_dir()}."
+            )
             _entries = {}
     return _entries
+
+
+def _backup_daily() -> None:
+    """Snapshot the on-disk log once per day, keeping the newest BACKUP_KEEP."""
+    if not LOG_PATH.exists():
+        return
+    folder = _backup_dir()
+    target = folder / f"{LOG_PATH.stem}-{sast_now():%Y-%m-%d}{LOG_PATH.suffix}"
+    if target.exists():
+        return
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(LOG_PATH, target)
+        snapshots = sorted(folder.glob(f"{LOG_PATH.stem}-*{LOG_PATH.suffix}"))
+        for old in snapshots[:-BACKUP_KEEP]:
+            old.unlink()
+    except Exception as exc:
+        logger.warning(f"Could not back up prediction log: {exc}")
 
 
 def _save(entries: Dict[str, Dict[str, Any]]) -> None:
     cutoff = sast_now() - timedelta(days=RETENTION_DAYS)
     for key in [k for k, e in entries.items() if (kickoff_sast(e["date"]) or cutoff) <= cutoff]:
         del entries[key]
+    _backup_daily()
     try:
         LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         tmp = LOG_PATH.with_name(LOG_PATH.name + ".tmp")
@@ -120,6 +182,8 @@ def record(league: str, pairs: Iterable[Tuple[Dict[str, Any], Dict[str, Any]]]) 
                 entry["p_btts"] = pred["btts"]["yes"]
             if pred.get("confidence"):
                 entry["confidence"] = pred["confidence"]
+            if pred.get("unrated_teams"):
+                entry["unrated"] = list(pred["unrated_teams"])
             score = (pred.get("predicted_score") or {}).get("score")
             if score:
                 entry["predicted_score"] = score
@@ -354,6 +418,20 @@ def summary(days: int = 30) -> Dict[str, Any]:
         "by_confidence": {c: (h / k, k) for c, (h, k) in per_conf.items()},
         "goals": goals,
     }
+
+
+def unrated_teams(days: int = 30) -> List[Tuple[str, str, int]]:
+    """(league, team, predictions) for teams logged with no rating at all
+    — neither match history nor a prior — most frequent first. Each is a
+    missing ranking entry or alias to fix."""
+    cutoff = sast_now() - timedelta(days=days)
+    counts: Counter = Counter()
+    with _lock:
+        for e in _load().values():
+            if (kickoff_sast(e["date"]) or cutoff) > cutoff:
+                for team in e.get("unrated") or []:
+                    counts[(e["league"], team)] += 1
+    return [(lg, team, n) for (lg, team), n in counts.most_common()]
 
 
 def history(days: int = 30, league: Optional[str] = None) -> List[Dict[str, Any]]:

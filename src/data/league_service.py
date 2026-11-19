@@ -74,6 +74,7 @@ _NATIONAL_ALIASES = {
     "Korea South": "South Korea",
     "North Korea": "Korea DPR",
     "Russia": "Russia",
+    "Football Union of Russia": "Russia",
     "Swaziland": "Eswatini",
     "The Gambia": "Gambia",
     "Ireland": "Republic of Ireland",

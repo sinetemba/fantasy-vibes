@@ -440,6 +440,15 @@ class TestFallback(unittest.TestCase):
             delta=0.01,
         )
 
+    def test_flags_only_teams_with_no_history_or_prior(self):
+        engine = self._fitted()
+        # Known side and prior-rated side are fine; only the ghost is flagged.
+        self.assertEqual(engine.predict("Team A", "Ghost FC")["unrated_teams"], ["Ghost FC"])
+        self.assertEqual(engine.predict("Giant", "Minnow")["unrated_teams"], [])
+        with self.assertLogs("src.data.prediction_engine", "WARNING") as logs:
+            engine.predict("Nowhere United", "Giant", competition="L")
+        self.assertTrue(any("Nowhere United" in line for line in logs.output))
+
 
 class TestGoalMarketsAndConfidence(unittest.TestCase):
 

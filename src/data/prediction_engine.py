@@ -375,6 +375,22 @@ def _apply_dixon_coles(
                 matrix[i][j] /= total
 
 
+_warned_unrated: set = set()
+
+
+def _warn_unrated(team: str, competition: Optional[str]) -> None:
+    """Warn once per process per (competition, team) that has no rating."""
+    key = (competition, team)
+    if key in _warned_unrated:
+        return
+    _warned_unrated.add(key)
+    logger.warning(
+        f"No rating for '{team}' ({competition or 'unknown competition'}): "
+        "using the default unrated Elo. Add it to data/national_rankings.json "
+        "or an alias in prediction_engine/_NATIONAL_ALIASES."
+    )
+
+
 class PredictionEngine:
     """Fits attack/defense, Elo and form from match history then predicts."""
 
@@ -1026,6 +1042,15 @@ class PredictionEngine:
         key = _TEAM_KEY_ALIASES.get(key, key)
         return self.elo_prior.get(key, self.elo_unrated)
 
+    def _is_unrated(self, team: str) -> bool:
+        """True when a team has neither match history nor a rating prior —
+        its prediction rests on the generic `elo_unrated` default, which
+        usually means a missing ranking entry or a name no alias bridges."""
+        if team in self.teams or team in self.elo:
+            return False
+        key = _norm_key(team)
+        return _TEAM_KEY_ALIASES.get(key, key) not in self.elo_prior
+
     def _fallback(
         self,
         home_team: str,
@@ -1035,6 +1060,9 @@ class PredictionEngine:
     ) -> Dict[str, Any]:
         home_elo = self._team_elo(home_team)
         away_elo = self._team_elo(away_team)
+        unrated = [t for t in (home_team, away_team) if self._is_unrated(t)]
+        for t in unrated:
+            _warn_unrated(t, competition)
         field = 0.0 if neutral else ELO_HOME_FIELD
         elo_diff = home_elo - away_elo + field
         expected_home = _expected_score(home_elo, away_elo, field)
@@ -1087,6 +1115,9 @@ class PredictionEngine:
             "home_team": home_team,
             "away_team": away_team,
             "model": "elo_fallback",
+            # Teams priced off the generic default rating — logged so
+            # missing rankings / aliases can be found and fixed.
+            "unrated_teams": unrated,
             "expected_goals": {"home": round(home_exp, 2), "away": round(away_exp, 2)},
             "outcome_probabilities": {
                 "home_win": home_win,

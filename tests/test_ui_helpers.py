@@ -11,7 +11,35 @@ from app.ui import (
     over_under_rows,
     prediction_caveat,
     prediction_drivers,
+    prediction_verdict,
 )
+
+
+def _probs(h, d, a):
+    return {"home_team": "Arsenal", "away_team": "Chelsea",
+            "outcome_probabilities": {"home_win": h, "draw": d, "away_win": a}}
+
+
+class TestVerdict(unittest.TestCase):
+
+    def test_draw_in_play_is_a_close_call(self):
+        self.assertEqual(prediction_verdict(_probs(0.40, 0.29, 0.31)), "Close call: Arsenal or a draw")
+
+    def test_even_sides_with_unlikely_draw_is_coin_flip(self):
+        self.assertEqual(prediction_verdict(_probs(0.43, 0.15, 0.42)), "Coin flip")
+
+    def test_clear_favourite_unchanged(self):
+        self.assertEqual(prediction_verdict(_probs(0.70, 0.18, 0.12)), "Arsenal strong favourites")
+
+    def test_draw_leading(self):
+        self.assertEqual(prediction_verdict(_probs(0.30, 0.40, 0.30)), "Draw the likeliest result")
+
+
+class TestUnratedCaveat(unittest.TestCase):
+
+    def test_caveat_names_unrated_team(self):
+        pred = dict(_probs(0.5, 0.3, 0.2), model="elo_fallback", unrated_teams=["Ghost FC"])
+        self.assertIn("no rating for Ghost FC", prediction_caveat(pred))
 
 
 def _pred(**extra):
