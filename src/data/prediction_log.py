@@ -18,8 +18,13 @@ logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 LOG_PATH = PROJECT_ROOT / "data" / "cache" / "prediction_log.json"
-# Settled and abandoned (never-played) entries are dropped after this long.
-RETENTION_DAYS = 120
+# Settled and abandoned (never-played) entries are dropped after this long
+# — a full season, so the track record and history cover one.
+RETENTION_DAYS = 365
+
+# Goal lines whose over-probability is logged (keys of the prediction's
+# over_under markets) and the entry field each is stored under.
+GOAL_LINE_FIELDS = {"1.5": "p_over15", "2.5": "p_over25", "3.5": "p_over35"}
 
 _lock = threading.Lock()
 _entries: Optional[Dict[str, Dict[str, Any]]] = None
@@ -106,6 +111,18 @@ def record(league: str, pairs: Iterable[Tuple[Dict[str, Any], Dict[str, Any]]]) 
                 "p_away": probs.get("away_win", 0.0),
                 "result": None,
             }
+            # Goals markets and confidence, so they're scored like outcomes.
+            over_under = pred.get("over_under") or {}
+            for line, field in GOAL_LINE_FIELDS.items():
+                if (over_under.get(line) or {}).get("over") is not None:
+                    entry[field] = over_under[line]["over"]
+            if (pred.get("btts") or {}).get("yes") is not None:
+                entry["p_btts"] = pred["btts"]["yes"]
+            if pred.get("confidence"):
+                entry["confidence"] = pred["confidence"]
+            score = (pred.get("predicted_score") or {}).get("score")
+            if score:
+                entry["predicted_score"] = score
             # Uncalibrated model probs (before temperature scaling and the
             # market blend) — the only input temperature() fits on.
             raw_probs = pred.get("raw_probabilities")
@@ -244,32 +261,113 @@ def temperature(league: str, days: int = 120, min_n: int = 120) -> Optional[floa
     return None if abs(T - 1.0) < 0.05 else round(T, 3)
 
 
+_OUTCOME_KEYS = {"home_win": "p_home", "draw": "p_draw", "away_win": "p_away"}
+
+
+def wilson_interval(hits: float, n: int, z: float = 1.96) -> Tuple[float, float]:
+    """95% Wilson score interval for a hit rate — honest error bars that
+    stay inside [0, 1] even for small samples."""
+    if n <= 0:
+        return (0.0, 1.0)
+    p = hits / n
+    denom = 1.0 + z * z / n
+    centre = (p + z * z / (2 * n)) / denom
+    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
+    return (max(0.0, centre - half), min(1.0, centre + half))
+
+
+def _outcome_hit(e: Dict[str, Any]) -> bool:
+    probs = {outcome: float(e[k]) for outcome, k in _OUTCOME_KEYS.items()}
+    return max(probs, key=probs.get) == e["result"]
+
+
+def _binary_market(rows: List[Tuple[float, bool]]) -> Optional[Dict[str, Any]]:
+    """Hit rate (call the side above 50%), Brier score and how often the
+    event happened, for a yes/no market's (p_yes, happened) rows."""
+    n = len(rows)
+    if not n:
+        return None
+    hits = sum((p >= 0.5) == happened for p, happened in rows)
+    return {
+        "n": n,
+        "hit_rate": hits / n,
+        "hit_rate_ci": wilson_interval(hits, n),
+        "brier": sum((p - happened) ** 2 for p, happened in rows) / n,
+        "base_rate": sum(happened for _, happened in rows) / n,
+    }
+
+
 def summary(days: int = 30) -> Dict[str, Any]:
     """Accuracy of settled predictions whose kickoff fell in the last
-    `days` days: hit rate (likeliest outcome), Brier score, log-loss and
-    the hit rate of always picking the home side, for context."""
+    `days` days: hit rate (likeliest outcome) with a 95% interval, Brier
+    score, log-loss, the hit rate of always picking the home side for
+    context, hit rate per confidence level, and the goals markets."""
     settled = _settled_entries(days)
     n = len(settled)
     if not n:
         return {"n": 0, "days": days}
-    keys = {"home_win": "p_home", "draw": "p_draw", "away_win": "p_away"}
     hits = brier = log_loss = 0.0
     per_league: Dict[str, List[int]] = {}
+    per_conf: Dict[str, List[int]] = {}
     for e in settled:
-        probs = {outcome: float(e[k]) for outcome, k in keys.items()}
-        hit = max(probs, key=probs.get) == e["result"]
+        probs = {outcome: float(e[k]) for outcome, k in _OUTCOME_KEYS.items()}
+        hit = _outcome_hit(e)
         hits += hit
         brier += sum((p - (o == e["result"])) ** 2 for o, p in probs.items())
         log_loss += -math.log(max(probs[e["result"]], 1e-9))
         tally = per_league.setdefault(e["league"], [0, 0])
         tally[0] += hit
         tally[1] += 1
+        if e.get("confidence"):
+            tally = per_conf.setdefault(e["confidence"], [0, 0])
+            tally[0] += hit
+            tally[1] += 1
+
+    scored = [
+        e for e in settled
+        if e.get("home_score") is not None and e.get("away_score") is not None
+    ]
+    goals: Dict[str, Any] = {}
+    for line, field in GOAL_LINE_FIELDS.items():
+        market = _binary_market([
+            (float(e[field]), e["home_score"] + e["away_score"] > float(line))
+            for e in scored if e.get(field) is not None
+        ])
+        if market:
+            goals[f"over_{line}"] = market
+    btts = _binary_market([
+        (float(e["p_btts"]), e["home_score"] > 0 and e["away_score"] > 0)
+        for e in scored if e.get("p_btts") is not None
+    ])
+    if btts:
+        goals["btts"] = btts
+
     return {
         "n": n,
         "days": days,
         "hit_rate": hits / n,
+        "hit_rate_ci": wilson_interval(hits, n),
         "brier": brier / n,
         "log_loss": log_loss / n,
         "home_baseline": sum(e["result"] == "home_win" for e in settled) / n,
         "per_league": {lg: (h / c, c) for lg, (h, c) in sorted(per_league.items())},
+        "by_confidence": {c: (h / k, k) for c, (h, k) in per_conf.items()},
+        "goals": goals,
     }
+
+
+def history(days: int = 30, league: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Every logged prediction — settled, awaiting a result, or upcoming —
+    whose kickoff is within the last `days` days or still ahead, newest
+    kickoff first. Settled entries gain `correct` (likeliest outcome hit)."""
+    cutoff = sast_now() - timedelta(days=days)
+    with _lock:
+        rows = [
+            dict(e) for e in _load().values()
+            if (league is None or e["league"] == league)
+            and (kickoff_sast(e["date"]) or cutoff) > cutoff
+        ]
+    for e in rows:
+        e["correct"] = _outcome_hit(e) if e.get("result") in _RESULT_IDX else None
+    rows.sort(key=lambda e: kickoff_sast(e["date"]) or cutoff, reverse=True)
+    return rows

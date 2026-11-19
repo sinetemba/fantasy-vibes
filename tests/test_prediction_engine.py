@@ -6,6 +6,8 @@ from src.data.prediction_engine import (
     DRAW_FLOOR,
     PredictionEngine,
     _draw_prob,
+    _goal_markets,
+    outcome_confidence,
 )
 
 
@@ -437,6 +439,77 @@ class TestFallback(unittest.TestCase):
             min(5.0, engine.league_avg_home * 2.0),
             delta=0.01,
         )
+
+
+class TestGoalMarketsAndConfidence(unittest.TestCase):
+
+    def _engine(self):
+        matches = []
+        for i in range(20):
+            home, away = ("A", "B") if i % 2 else ("B", "A")
+            matches.append({
+                "status": "full_time", "home_team": home, "away_team": away,
+                "home_score": (i * 7) % 4, "away_score": (i * 3) % 3,
+                "date": f"2026-{1 + i // 10:02d}-{1 + i % 10:02d}T15:00:00",
+            })
+        engine = PredictionEngine()
+        engine.fit(matches)
+        return engine
+
+    def test_goal_lines_are_ordered_and_complementary(self):
+        pred = self._engine().predict("A", "B")
+        ou = pred["over_under"]
+        self.assertEqual(set(ou), {"1.5", "2.5", "3.5"})
+        for m in ou.values():
+            self.assertAlmostEqual(m["over"] + m["under"], 1.0, places=3)
+        # A higher line is always harder to go over.
+        self.assertGreater(ou["1.5"]["over"], ou["2.5"]["over"])
+        self.assertGreater(ou["2.5"]["over"], ou["3.5"]["over"])
+        self.assertEqual(pred["over_under_2_5"], ou["2.5"])
+        self.assertAlmostEqual(pred["btts"]["yes"] + pred["btts"]["no"], 1.0, places=3)
+
+    def test_goal_markets_from_known_matrix(self):
+        # All mass on 1-1: over 1.5 certain, over 2.5 impossible, BTTS certain.
+        matrix = [[0.0] * 7 for _ in range(7)]
+        matrix[1][1] = 1.0
+        g = _goal_markets(matrix)
+        self.assertEqual(g["over_under"]["1.5"]["over"], 1.0)
+        self.assertEqual(g["over_under"]["2.5"]["over"], 0.0)
+        self.assertEqual(g["btts"]["yes"], 1.0)
+
+    def test_drivers_explain_the_blend(self):
+        pred = self._engine().predict("A", "B")
+        d = pred["drivers"]
+        self.assertIn("home", d["elo"])
+        self.assertGreater(d["elo"]["home_field"], 0)
+        self.assertIn("home", d["form_context"])
+        comps = d["components"]
+        for key in ("goal_model", "rating_model"):
+            self.assertAlmostEqual(sum(comps[key].values()), 1.0, places=3)
+        # The blend is a weighted mix of the two models (before rounding).
+        w = comps["goal_model_weight"]
+        mix = w * comps["goal_model"]["home_win"] + (1 - w) * comps["rating_model"]["home_win"]
+        self.assertAlmostEqual(pred["outcome_probabilities"]["home_win"], mix, places=2)
+
+    def test_neutral_drivers_have_no_home_field(self):
+        pred = self._engine().predict("A", "B", neutral=True)
+        self.assertEqual(pred["drivers"]["elo"]["home_field"], 0)
+
+    def test_fallback_has_goal_markets_and_rating_drivers(self):
+        pred = self._engine().predict("A", "Unknown FC")
+        self.assertEqual(pred["model"], "elo_fallback")
+        self.assertIn("3.5", pred["over_under"])
+        self.assertIsNone(pred["drivers"]["components"])
+
+    def test_confidence_levels(self):
+        def probs(h, d, a):
+            return {"home_win": h, "draw": d, "away_win": a}
+
+        self.assertEqual(outcome_confidence(probs(0.65, 0.2, 0.15)), "high")
+        self.assertEqual(outcome_confidence(probs(0.48, 0.27, 0.25)), "medium")
+        self.assertEqual(outcome_confidence(probs(0.38, 0.30, 0.32)), "low")
+        # A clear favourite on a ratings-only estimate is still low.
+        self.assertEqual(outcome_confidence(probs(0.7, 0.2, 0.1), "elo_fallback"), "low")
 
 
 if __name__ == "__main__":

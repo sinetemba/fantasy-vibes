@@ -16,6 +16,7 @@ from app.ui import (
     display_disclaimer,
     display_header,
     form_badges_html,
+    prediction_drivers,
     prediction_summary_html,
     show_warning_message,
 )
@@ -288,5 +289,10 @@ def _render_prediction_summary(
             f"&nbsp;<span style='font-size:0.7rem;'>(W win · D draw · L loss — latest →)</span></div>",
             unsafe_allow_html=True,
         )
+    drivers = prediction_drivers(pred, home, away)
+    if drivers:
+        with st.expander("🧩 How this prediction was made"):
+            for line in drivers:
+                st.markdown(f"- {line}")
     if pred.get("predicted_at"):
         st.caption(f"Predicted on {pred['predicted_at']}")

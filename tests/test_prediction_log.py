@@ -209,6 +209,72 @@ class TestPredictionLog(unittest.TestCase):
         )
         self.assertIsNone(prediction_log.temperature("PL", min_n=100))
 
+    def test_record_stores_goals_markets_and_confidence(self):
+        pred = _pred(0.6, 0.25, 0.15)
+        pred.update({
+            "over_under": {"1.5": {"over": 0.8}, "2.5": {"over": 0.55}, "3.5": {"over": 0.3}},
+            "btts": {"yes": 0.5},
+            "confidence": "high",
+            "predicted_score": {"score": "2-0"},
+        })
+        prediction_log.record("PL", [(self._fixture("12", "A", "B", 2), pred)])
+        e = prediction_log._load()["PL|12"]
+        self.assertEqual((e["p_over15"], e["p_over25"], e["p_over35"]), (0.8, 0.55, 0.3))
+        self.assertEqual(e["p_btts"], 0.5)
+        self.assertEqual(e["confidence"], "high")
+        self.assertEqual(e["predicted_score"], "2-0")
+
+    def _settled_with(self, key, hs, aws, **fields):
+        entries = prediction_log._load()
+        entries[key] = {
+            "league": "PL", "match_id": key, "home_team": "A", "away_team": "B",
+            "date": (sast_now() - timedelta(days=1)).isoformat(),
+            "predicted_at": sast_now().isoformat(), "model": "x",
+            "p_home": 0.6, "p_draw": 0.25, "p_away": 0.15,
+            "home_score": hs, "away_score": aws,
+            "result": "home_win" if hs > aws else ("draw" if hs == aws else "away_win"),
+            **fields,
+        }
+
+    def test_summary_scores_goals_and_confidence(self):
+        # 3-1: over 2.5 yes, BTTS yes, home win (pick correct).
+        self._settled_with("a", 3, 1, p_over25=0.7, p_btts=0.6, confidence="high")
+        # 0-0: over 2.5 no, BTTS no, draw (pick wrong).
+        self._settled_with("b", 0, 0, p_over25=0.6, p_btts=0.4, confidence="low")
+        # Legacy entry: no goals fields - counts for outcomes only.
+        self._settled_with("c", 1, 0)
+        report = prediction_log.summary(days=30)
+        self.assertEqual(report["n"], 3)
+        over = report["goals"]["over_2.5"]
+        self.assertEqual(over["n"], 2)
+        self.assertAlmostEqual(over["hit_rate"], 0.5)
+        self.assertAlmostEqual(over["base_rate"], 0.5)
+        btts = report["goals"]["btts"]
+        self.assertAlmostEqual(btts["hit_rate"], 1.0)
+        self.assertEqual(report["by_confidence"]["high"], (1.0, 1))
+        self.assertEqual(report["by_confidence"]["low"], (0.0, 1))
+        lo, hi = report["hit_rate_ci"]
+        self.assertTrue(0.0 <= lo < report["hit_rate"] < hi <= 1.0)
+
+    def test_wilson_interval(self):
+        lo, hi = prediction_log.wilson_interval(50, 100)
+        self.assertAlmostEqual(lo, 0.404, places=2)
+        self.assertAlmostEqual(hi, 0.596, places=2)
+        self.assertEqual(prediction_log.wilson_interval(0, 0), (0.0, 1.0))
+
+    def test_history_lists_settled_and_upcoming_newest_first(self):
+        self._settled_with("old", 2, 0)
+        prediction_log.record("PL", [(self._fixture("up", "C", "D", 3), _pred(0.3, 0.3, 0.4))])
+        prediction_log.record("BL1", [(self._fixture("x", "E", "F", 3), _pred(0.5, 0.3, 0.2))])
+        rows = prediction_log.history(days=30, league="PL")
+        self.assertEqual([r["match_id"] for r in rows], ["up", "old"])
+        self.assertIsNone(rows[0]["correct"])
+        self.assertTrue(rows[1]["correct"])
+        self.assertEqual(len(prediction_log.history(days=30)), 3)
+
+    def test_retention_keeps_a_season(self):
+        self.assertGreaterEqual(prediction_log.RETENTION_DAYS, 365)
+
 
 if __name__ == "__main__":
     unittest.main()

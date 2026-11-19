@@ -292,6 +292,67 @@ def _weighted_avg(values: np.ndarray, weights: np.ndarray) -> float:
     return float(np.average(values, weights=weights))
 
 
+# Total-goals lines offered as Over/Under markets.
+GOAL_LINES = (1.5, 2.5, 3.5)
+
+# Confidence bands on the final outcome distribution: the likeliest
+# outcome's probability and its lead over the runner-up must both clear
+# the band's floor.
+CONFIDENCE_HIGH = (0.55, 0.20)
+CONFIDENCE_MEDIUM = (0.45, 0.10)
+
+
+def _goal_markets(matrix: List[List[float]]) -> Dict[str, Any]:
+    """Over/Under for each of GOAL_LINES plus both-teams-to-score from a
+    score matrix. Under and "a side scores nothing" are sums over
+    low-score cells, which the truncated matrix holds in full — so the
+    complements carry the >6-goal tail instead of silently dropping it."""
+    n = len(matrix)
+    over_under = {}
+    for line in GOAL_LINES:
+        under = sum(matrix[i][j] for i in range(n) for j in range(n) if i + j < line)
+        under = min(1.0, max(0.0, under))
+        over_under[f"{line:g}"] = {"over": round(1.0 - under, 4), "under": round(under, 4)}
+    home_blank = sum(matrix[0])
+    away_blank = sum(row[0] for row in matrix)
+    btts_no = min(1.0, max(0.0, home_blank + away_blank - matrix[0][0]))
+    return {
+        "over_under": over_under,
+        # Kept for callers that predate the multi-line markets.
+        "over_under_2_5": over_under["2.5"],
+        "btts": {"yes": round(1.0 - btts_no, 4), "no": round(btts_no, 4)},
+    }
+
+
+def _normalised_outcomes(home: float, draw: float, away: float) -> Dict[str, float]:
+    total = home + draw + away
+    if total <= 0:
+        return {"home_win": 0.0, "draw": 0.0, "away_win": 0.0}
+    return {
+        "home_win": round(home / total, 4),
+        "draw": round(draw / total, 4),
+        "away_win": round(away / total, 4),
+    }
+
+
+def outcome_confidence(probs: Dict[str, Any], model: Optional[str] = None) -> str:
+    """'high' / 'medium' / 'low' from how clearly one outcome leads the
+    final distribution. Rating-only fallback predictions are always
+    'low' — they rest on a prior, not the team's results."""
+    ranked = sorted(
+        (float(probs.get(k) or 0.0) for k in ("home_win", "draw", "away_win")),
+        reverse=True,
+    )
+    if model == "elo_fallback":
+        return "low"
+    top, gap = ranked[0], ranked[0] - ranked[1]
+    if top >= CONFIDENCE_HIGH[0] and gap >= CONFIDENCE_HIGH[1]:
+        return "high"
+    if top >= CONFIDENCE_MEDIUM[0] and gap >= CONFIDENCE_MEDIUM[1]:
+        return "medium"
+    return "low"
+
+
 def _apply_dixon_coles(
     matrix: List[List[float]], home_exp: float, away_exp: float, rho: float
 ) -> None:
@@ -829,7 +890,6 @@ class PredictionEngine:
         rho = self.comp_rho.get(str(competition), self.dc_rho)
         _apply_dixon_coles(matrix, home_exp, away_exp, rho)
         poisson_home_win = poisson_draw = poisson_away_win = 0.0
-        over = under = btts_yes = 0.0
 
         for i in range(max_goals + 1):
             for j in range(max_goals + 1):
@@ -840,17 +900,13 @@ class PredictionEngine:
                     poisson_draw += p
                 else:
                     poisson_away_win += p
-                if i + j > 2.5:
-                    over += p
-                else:
-                    under += p
-                if i > 0 and j > 0:
-                    btts_yes += p
+        goal_markets = _goal_markets(matrix)
 
         # Blend Elo and Poisson win/draw/loss
         wp = BLEND_POISSON
+        draw_elo = draw
         home_win = wp * poisson_home_win + (1 - wp) * elo_home_win
-        draw = wp * poisson_draw + (1 - wp) * draw
+        draw = wp * poisson_draw + (1 - wp) * draw_elo
         away_win = wp * poisson_away_win + (1 - wp) * elo_away_win
         total = home_win + draw + away_win
         if total:
@@ -877,8 +933,29 @@ class PredictionEngine:
                 "score": best_score,
                 "probability": round(max_prob, 4),
             },
-            "over_under_2_5": {"over": round(over, 4), "under": round(under, 4)},
-            "btts": {"yes": round(btts_yes, 4), "no": round(1.0 - btts_yes, 4)},
+            **goal_markets,
+            # What moved the outcome probabilities, for the "how this
+            # prediction was made" explanation.
+            "drivers": {
+                "elo": {
+                    "home": round(self.elo[home_team]),
+                    "away": round(self.elo[away_team]),
+                    "home_field": round(field),
+                },
+                "form_context": {
+                    "home": round(home_factor, 3),
+                    "away": round(away_factor, 3),
+                },
+                "components": {
+                    "goal_model": _normalised_outcomes(
+                        poisson_home_win, poisson_draw, poisson_away_win
+                    ),
+                    "rating_model": _normalised_outcomes(
+                        elo_home_win, draw_elo, elo_away_win
+                    ),
+                    "goal_model_weight": wp,
+                },
+            },
             "team_attack_params": {
                 "home": round(self.home_attack.get(home_team, 1.0), 3),
                 "away": round(self.away_attack.get(away_team, 1.0), 3),
@@ -1004,8 +1081,7 @@ class PredictionEngine:
         ]
         _apply_dixon_coles(matrix, home_exp, away_exp, self.dc_rho)
         best_score, max_prob = self._modal_score(matrix, home_win, draw, away_win)
-        over = sum(matrix[i][j] for i in range(7) for j in range(7) if i + j > 2.5)
-        btts_yes = sum(matrix[i][j] for i in range(1, 7) for j in range(1, 7))
+        goal_markets = _goal_markets(matrix)
 
         return {
             "home_team": home_team,
@@ -1021,8 +1097,17 @@ class PredictionEngine:
                 "score": best_score,
                 "probability": round(max_prob, 4),
             },
-            "over_under_2_5": {"over": round(over, 4), "under": round(1.0 - over, 4)},
-            "btts": {"yes": round(btts_yes, 4), "no": round(1.0 - btts_yes, 4)},
+            **goal_markets,
+            # Ratings only — no goal model or form/table adjustment here.
+            "drivers": {
+                "elo": {
+                    "home": round(home_elo),
+                    "away": round(away_elo),
+                    "home_field": round(field),
+                },
+                "form_context": None,
+                "components": None,
+            },
             "team_attack_params": {"home": 1.0, "away": 1.0},
             "team_defense_params": {"home": 1.0, "away": 1.0},
             "model_inputs": {

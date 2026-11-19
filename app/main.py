@@ -52,6 +52,7 @@ PAGES = {
     "📊 Table": "Table",
     "🔮 Predictions": "Predictions",
     "📈 Stats": "Stats",
+    "📏 Track Record": "TrackRecord",
     "ℹ️ About": "About",
 }
 
@@ -307,6 +308,9 @@ def render_page():
         elif page == "Stats":
             from app.pages import stats
             stats.render(service)
+        elif page == "TrackRecord":
+            from app.pages import track_record
+            track_record.render(service)
         elif page == "About":
             from app.pages import about
             about.render(service)

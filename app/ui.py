@@ -330,7 +330,143 @@ def prediction_caveat(pred: Dict) -> str:
     note = staleness_note(pred)
     if pred.get("model") == "elo_fallback":
         return "⚠️ Limited data: rating-only estimate" + (f" · {note}" if note else "")
-    return f"⚠️ Low confidence — {note}" if note else ""
+    return f"⚠️ Data caveat — {note}" if note else ""
+
+
+# Label and colour per confidence level (see outcome_confidence).
+CONFIDENCE_STYLES = {
+    "high": ("High confidence", "#00c96b"),
+    "medium": ("Medium confidence", "#f1c40f"),
+    "low": ("Low confidence", "#e67e22"),
+}
+CONFIDENCE_HELP = (
+    "How clearly one result leads: high = likeliest result ≥55% and 20+ "
+    "points ahead, medium = ≥45% and 10+ ahead, low otherwise or when "
+    "the data is thin or stale."
+)
+
+
+def confidence_level(pred: Dict) -> Optional[str]:
+    """The prediction's confidence, downgraded to 'low' when it carries a
+    data caveat — a clear favourite on stale data isn't a confident call."""
+    level = pred.get("confidence")
+    if level and prediction_caveat(pred):
+        return "low"
+    return level
+
+
+def confidence_badge_html(pred: Dict) -> str:
+    level = confidence_level(pred)
+    if level not in CONFIDENCE_STYLES:
+        return ""
+    label, colour = CONFIDENCE_STYLES[level]
+    return (
+        f"<span title='{safe_html(CONFIDENCE_HELP)}' style='display:inline-block;"
+        f"font-size:0.75rem;font-weight:700;padding:1px 8px;border-radius:10px;"
+        f"border:1px solid {colour};color:{colour};margin-left:6px;"
+        f"vertical-align:middle;'>{label}</span>"
+    )
+
+
+def _market_prob(pred: Dict, line: str = "2.5") -> Optional[float]:
+    markets = pred.get("over_under") or {}
+    over = (markets.get(line) or {}).get("over")
+    if over is None and line == "2.5":
+        over = (pred.get("over_under_2_5") or {}).get("over")
+    return over
+
+
+def goals_text(pred: Dict) -> str:
+    """'Over 2.5 goals 54% · Both teams score 51%' for compact cards."""
+    parts = []
+    over = _market_prob(pred, "2.5")
+    if over is not None:
+        parts.append(f"Over 2.5 goals {over * 100:.0f}%")
+    btts = (pred.get("btts") or {}).get("yes")
+    if btts is not None:
+        parts.append(f"Both teams score {btts * 100:.0f}%")
+    return " · ".join(parts)
+
+
+def over_under_rows(pred: Dict) -> List[tuple]:
+    """(line, over, under) for every Over/Under line the prediction has."""
+    markets = pred.get("over_under") or {}
+    if not markets and pred.get("over_under_2_5"):
+        markets = {"2.5": pred["over_under_2_5"]}
+    return [
+        (line, m.get("over", 0.0), m.get("under", 0.0))
+        for line, m in sorted(markets.items(), key=lambda kv: float(kv[0]))
+    ]
+
+
+def _pct_shift(factor: float) -> str:
+    delta = round((float(factor) - 1.0) * 100)
+    return "no change" if delta == 0 else f"{delta:+d}%"
+
+
+def prediction_drivers(
+    pred: Dict, home: Optional[str] = None, away: Optional[str] = None
+) -> List[str]:
+    """Plain-language list of what produced the outcome probabilities:
+    the rating gap, the form/table adjustment, how the goal and rating
+    models were combined, calibration and the market blend."""
+    home, away = _team_labels(pred, home, away)
+    drivers = pred.get("drivers") or {}
+    lines: List[str] = []
+
+    elo = drivers.get("elo")
+    if elo:
+        field = elo.get("home_field") or 0
+        gap = (elo.get("home") or 0) - (elo.get("away") or 0)
+        edge = f", plus {field} for playing at home" if field else " (neutral venue)"
+        lines.append(
+            f"**Team ratings:** {home} {elo.get('home')} vs {away} {elo.get('away')} "
+            f"— a {abs(gap)}-point gap {'for ' + home if gap >= 0 else 'for ' + away}{edge}."
+        )
+
+    fc = drivers.get("form_context")
+    if fc:
+        lines.append(
+            f"**Recent form & league position:** {home} {_pct_shift(fc.get('home', 1.0))}, "
+            f"{away} {_pct_shift(fc.get('away', 1.0))} to their expected strength."
+        )
+
+    comps = drivers.get("components")
+    if comps:
+        goal, rating = comps.get("goal_model") or {}, comps.get("rating_model") or {}
+        w = int(round((comps.get("goal_model_weight") or 0.5) * 100))
+
+        def _hda(p: Dict) -> str:
+            h, d, a = _whole_percents(
+                p.get("home_win", 0), p.get("draw", 0), p.get("away_win", 0)
+            )
+            return f"{h}/{d}/{a}"
+
+        lines.append(
+            f"**Two models combined ({w}% / {100 - w}%):** goals model "
+            f"{_hda(goal)}, ratings model {_hda(rating)} (home/draw/away %)."
+        )
+    elif pred.get("model") == "elo_fallback":
+        lines.append(
+            "**Ratings only:** not enough match history for the goals model, "
+            "so this rests on team ratings alone."
+        )
+
+    T = drivers.get("calibration_T")
+    if T:
+        lines.append(
+            "**Calibration:** "
+            + (
+                "flattened, because recent predictions were overconfident."
+                if T > 1
+                else "sharpened, because recent predictions were too cautious."
+            )
+        )
+
+    market = market_note(pred)
+    if market:
+        lines.append(f"**Bookmaker odds:** {market[0].lower() + market[1:]}.")
+    return lines
 
 
 def _vs_average(ratio: float, verb: str) -> str:
@@ -380,12 +516,15 @@ def prediction_summary_html(
     reasons = prediction_reasons(pred, home, away)
     caveat = prediction_caveat(pred)
     market = market_note(pred)
+    goals = goals_text(pred)
     muted = "font-size:0.8rem;color:var(--fv-muted);margin-top:0.3rem;"
     return (
         f"<div style='font-weight:700;font-size:1rem;margin-top:0.5rem;'>"
-        f"{safe_html(prediction_verdict(pred, home, away))}</div>"
+        f"{safe_html(prediction_verdict(pred, home, away))}"
+        f"{confidence_badge_html(pred)}</div>"
         f"{outcome_bar_html(pred, home, away)}"
         f"<div style='font-size:0.85rem;margin-top:0.4rem;'>{safe_html(scorelines_text(pred))}</div>"
+        + (f"<div style='font-size:0.85rem;'>{safe_html(goals)}</div>" if goals else "")
         + (f"<div style='{muted}'>{safe_html(reasons)}</div>" if reasons else "")
         + (f"<div style='{muted}'>{safe_html(market)}</div>" if market else "")
         + (f"<div style='{muted}color:#f1c40f;'>{safe_html(caveat)}</div>" if caveat else "")

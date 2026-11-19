@@ -5,14 +5,19 @@ from datetime import datetime
 import streamlit as st
 
 from app.ui import (
+    CONFIDENCE_HELP,
     apply_theme,
+    confidence_badge_html,
+    confidence_level,
     create_scoreline_chart,
     display_disclaimer,
     display_header,
     form_badges_html,
     market_note,
     outcome_bar_html,
+    over_under_rows,
     prediction_caveat,
+    prediction_drivers,
     prediction_reasons,
     prediction_verdict,
     safe_html,
@@ -102,10 +107,12 @@ def _display_prediction(pred, service: LeagueService):
     # the reasons behind it.
     st.markdown(
         f"<div style='font-size:1.6rem;font-weight:800;color:#00ff85;margin:0.25rem 0;'>"
-        f"{safe_html(prediction_verdict(pred))}</div>"
+        f"{safe_html(prediction_verdict(pred))}{confidence_badge_html(pred)}</div>"
         f"{outcome_bar_html(pred)}",
         unsafe_allow_html=True,
     )
+    if confidence_level(pred):
+        st.caption(CONFIDENCE_HELP)
     reasons = prediction_reasons(pred)
     if reasons:
         st.markdown(reasons)
@@ -115,6 +122,11 @@ def _display_prediction(pred, service: LeagueService):
     caveat = prediction_caveat(pred)
     if caveat:
         st.warning(caveat)
+    drivers = prediction_drivers(pred)
+    if drivers:
+        with st.expander("🧩 How this prediction was made"):
+            for line in drivers:
+                st.markdown(f"- {line}")
 
     st.markdown("#### 🎯 Most likely scores")
     scores = top_scorelines(pred, n=3)
@@ -127,11 +139,19 @@ def _display_prediction(pred, service: LeagueService):
     )
 
     st.markdown("#### 📋 Goals")
-    g1, g2, g3, g4 = st.columns(4)
+    g1, g2, g3 = st.columns(3)
     g1.metric(f"{home} expected goals", f"{expected.get('home', 0):.1f}")
     g2.metric(f"{away} expected goals", f"{expected.get('away', 0):.1f}")
-    g3.metric("Over 2.5 goals", f"{(pred.get('over_under_2_5') or {}).get('over', 0) * 100:.0f}%")
-    g4.metric("Both teams score", f"{(pred.get('btts') or {}).get('yes', 0) * 100:.0f}%")
+    g3.metric("Both teams score", f"{(pred.get('btts') or {}).get('yes', 0) * 100:.0f}%")
+    rows = over_under_rows(pred)
+    if rows:
+        ou_cols = st.columns(len(rows))
+        for col, (line, over, under) in zip(ou_cols, rows):
+            col.metric(
+                f"Over {line} goals",
+                f"{over * 100:.0f}%",
+                help=f"Under {line}: {under * 100:.0f}%",
+            )
 
     strength = team_strength_lines(pred)
     home_stats = service.get_team_stats(home)

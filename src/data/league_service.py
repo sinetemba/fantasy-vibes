@@ -18,6 +18,7 @@ from .prediction_engine import (
     _rounded_probs,
     _TEAM_KEY_ALIASES,
     fixtures_equivalent,
+    outcome_confidence,
     teams_equivalent,
 )
 from . import odds, prediction_log
@@ -1116,6 +1117,12 @@ class LeagueService:
                 "away_win": ma,
                 "weight": w,
             }
+        if T and isinstance(pred.get("drivers"), dict):
+            pred["drivers"]["calibration_T"] = T
+        # Confidence is judged on the final distribution users see.
+        pred["confidence"] = outcome_confidence(
+            pred.get("outcome_probabilities") or {}, pred.get("model")
+        )
         return pred
 
     def _market_probs(self, home: str, away: str) -> Optional[Tuple[float, float, float]]:
