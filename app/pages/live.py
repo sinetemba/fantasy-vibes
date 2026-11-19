@@ -14,7 +14,7 @@ from app.ui import (
     show_warning_message,
 )
 from src.data import LeagueService
-from src.data.utils import bust_live_cache, is_upcoming
+from src.data.utils import bust_live_cache, is_upcoming, sast_now
 
 
 def _refresh(service: LeagueService):
@@ -67,13 +67,30 @@ def render(service: LeagueService):
     display_disclaimer()
 
 
+def _within_live_window(m) -> bool:
+    """Keep the live page to the last day onward — older results and
+    past-dated 'scheduled' feed leftovers don't belong here."""
+    raw = m.get("date") or ""
+    try:
+        kickoff = datetime.fromisoformat(raw).replace(tzinfo=None)
+    except Exception:
+        return False
+    cutoff = sast_now() - timedelta(days=1)
+    # Date-only rows have no kickoff time — compare by day so a result
+    # played yesterday evening isn't dropped the moment today starts.
+    if "T" not in raw:
+        return kickoff.date() >= cutoff.date()
+    return kickoff >= cutoff
+
+
 def _render_match_lists(service: LeagueService):
-    matches = service.get_matches()
-    if not matches:
+    all_matches = service.get_matches()
+    if not all_matches:
         show_warning_message("No match data available for this league.")
         return
+    matches = [m for m in all_matches if _within_live_window(m)]
 
-    live = service.get_live_matches()
+    live = [m for m in service.get_live_matches() if _within_live_window(m)]
     full_time = [m for m in matches if m.get("status") == "full_time"]
     scheduled = [m for m in matches if is_upcoming(m)]
 
@@ -110,7 +127,7 @@ def _render_match_lists(service: LeagueService):
         display_metric_card("Goals", str(total), "")
 
     if not live and not full_time and not scheduled:
-        show_info_message("No matches found in any status filter.")
+        show_info_message("No matches in the last day.")
 
     st.markdown("---")
 

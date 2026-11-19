@@ -2,6 +2,7 @@
 
 import html
 import logging
+import re
 import threading
 import time
 from datetime import datetime
@@ -296,8 +297,9 @@ def league_name(code: Optional[str]) -> Optional[str]:
 
 
 def prediction_reasons(pred: Dict, home: Optional[str] = None, away: Optional[str] = None) -> str:
-    """'Why: Arsenal 2nd in Premier League, 2.3 pts/game (last 10); …' —
-    the table-position and form inputs behind the prediction."""
+    """'Why: Arsenal **2nd** in Premier League, 2.3 pts/game (last 10); …' —
+    the table-position and form inputs behind the prediction. The '**'
+    markers render as bold via st.markdown, or as <b> in summary HTML."""
     home, away = _team_labels(pred, home, away)
     inputs = pred.get("model_inputs") or {}
 
@@ -311,7 +313,7 @@ def prediction_reasons(pred: Dict, home: Optional[str] = None, away: Optional[st
         parts = []
         pos, league = _num(info.get("position")), info.get("context_league")
         if pos and league:
-            parts.append(f"{_ordinal(int(pos))} in {league_name(league)}")
+            parts.append(f"**{_ordinal(int(pos))}** in {league_name(league)}")
         form_ppg = _num(info.get("form_ppg"))
         if form_ppg is not None:
             parts.append(f"{form_ppg:.1f} pts/game (last 10)")
@@ -514,6 +516,8 @@ def prediction_summary_html(
     """Compact prediction block for fixture lists and match cards: verdict,
     outcome bar, likeliest scores, reasons and any data caveat."""
     reasons = prediction_reasons(pred, home, away)
+    # '**2nd**' markers in reasons → real <b> tags once the text is escaped.
+    reasons_html = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", safe_html(reasons))
     caveat = prediction_caveat(pred)
     market = market_note(pred)
     goals = goals_text(pred)
@@ -525,7 +529,7 @@ def prediction_summary_html(
         f"{outcome_bar_html(pred, home, away)}"
         f"<div style='font-size:0.85rem;margin-top:0.4rem;'>{safe_html(scorelines_text(pred))}</div>"
         + (f"<div style='font-size:0.85rem;'>{safe_html(goals)}</div>" if goals else "")
-        + (f"<div style='{muted}'>{safe_html(reasons)}</div>" if reasons else "")
+        + (f"<div style='{muted}'>{reasons_html}</div>" if reasons else "")
         + (f"<div style='{muted}'>{safe_html(market)}</div>" if market else "")
         + (f"<div style='{muted}color:#f1c40f;'>{safe_html(caveat)}</div>" if caveat else "")
     )
