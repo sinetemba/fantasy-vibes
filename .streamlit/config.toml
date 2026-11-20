@@ -5,3 +5,12 @@ backgroundColor = "#0b0c10"
 secondaryBackgroundColor = "#1f2833"
 textColor = "#f5f6f7"
 font = "sans serif"
+
+# Fixed port so this app never competes with AlphaLens, which owns 8501
+# (its dashboard task starts at logon). Read from the current directory -
+# start the app from the repo root: streamlit run app/main.py
+[server]
+port = 8502
+# This PC only - without it Streamlit listens on every network interface and
+# the app is reachable from any network the PC joins.
+address = "localhost"
